@@ -1,0 +1,86 @@
+default:
+  tags:
+    - proxmox
+
+stages:
+  - deps
+  - lint
+  - test
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+
+.kaniko_image: &kaniko_image
+  image:
+    name: docker-public.binary.picodata.io/kaniko-project/executor:v1.14.0-debug
+    entrypoint: ['']
+    pull_policy: [if-not-present]
+
+.cache: &cache-node
+  key:
+    files:
+      - go/
+  paths:
+    - go/
+  policy: pull-push
+
+install-deps:
+  stage: deps
+  cache:
+    - <<: *cache-node
+      policy: push
+  script:
+    - /usr/bin/wget https://go.dev/dl/go1.23.3.linux-amd64.tar.gz
+    - tar -C ./ -xzf ./go1.23.3.linux-amd64.tar.gz
+
+lint:
+  stage: lint
+  variables:
+    GOROOT: /builds/core/picodata-go/go
+  cache:
+    - <<: *cache-node
+      policy: pull
+  script:
+    - ./go/bin/go vet .
+
+test-unit:
+  stage: test
+  needs: ["lint"]
+  variables:
+    GOROOT: /builds/core/picodata-go/go
+  cache:
+    - <<: *cache-node
+      policy: pull
+  script:
+    - ./go/bin/go test -run "TestBalancer|TestStateMachine" .
+
+test-integration:
+  stage: test
+  needs: ["lint"]
+  variables:
+    FF_NETWORK_PER_BUILD: 1
+    PICODATA_IMAGE: docker-public.binary.picodata.io/picodata:master
+    # picodata env
+    PICODATA_PEER: picodata-1:3301
+    PICODATA_INIT_REPLICATION_FACTOR: 1
+    PICODATA_ADMIN_PASSWORD: $PICOPASS
+    GOROOT: /builds/core/picodata-go/go
+  cache:
+    - <<: *cache-node
+      policy: pull
+  services:
+    - name: $PICODATA_IMAGE
+      alias: picodata-1
+      variables:
+        PICODATA_LISTEN: picodata-1:3301
+        PICODATA_ADVERTISE: picodata-1:3301
+        PICODATA_PG_LISTEN: picodata-1:5432
+    - name: $PICODATA_IMAGE
+      alias: picodata-2
+      variables:
+        PICODATA_LISTEN: picodata-2:3301
+        PICODATA_ADVERTISE: picodata-2:3301
+        PICODATA_PG_LISTEN: picodata-2:5432
+  script:
+    - ./go/bin/go test --ci -v -run TestDiscovery .
