@@ -1,26 +1,34 @@
 package picodata
 
 import (
-	s "git.picodata.io/core/picodata-go/strats"
+	"git.picodata.io/core/picodata-go/logger"
+	"git.picodata.io/core/picodata-go/strategies"
 )
 
-type PoolOption func(*Pool)
+type PoolOption func(*Pool) error
 
-func WithBalancerFunc(fn s.BalanceStratFunc) PoolOption {
-	return func(cp *Pool) {
-		cp.balancer.SetBalanceStratFunc(fn)
+// WithBalanceStrategy defines logic of pool balancing across connections
+func WithBalanceStrategy(strategy strategies.BalanceStrategy) PoolOption {
+	return func(p *Pool) error {
+		p.provider.setBalanceStrategy(strategy)
+		return nil
 	}
 }
 
-func WithBalancerStrat(strategy s.BalanceStratType) PoolOption {
-	return func(cp *Pool) {
-		switch strategy {
-		case s.RandomStrat:
-			cp.balancer.SetBalanceStratFunc(s.RandomFunc)
-			break
-		case s.RoundRobinStrat:
-			cp.balancer.SetBalanceStratFunc(s.RoundRobinFunc)
-			break
+// WithLogger sets a custom pool internal logger to print information
+func WithLogger(customLogger logger.Logger) PoolOption {
+	return func(p *Pool) error {
+		logger.SetDefaultLogger(customLogger)
+		return nil
+	}
+}
+
+// WithLogLevel set a logger level for pool internal logger
+func WithLogLevel(level logger.LogLevel) PoolOption {
+	return func(p *Pool) error {
+		if err := logger.SetLevel(level); err != nil {
+			return err
 		}
+		return nil
 	}
 }

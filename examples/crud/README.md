@@ -1,26 +1,23 @@
 # Description
 
-This is a simple CRUD cli-app implemented using picodata-go as the connector
-to a Piscodata database.
+This is a simple CRUD CLI app implemented using `picodata-go` as the connector  
+to a Picodata database.
 
 # Usage
-Set an env varibale
+
+Export the environment variable:
 
     export PICODATA_CONNECTION_URL='postgres://login:pass@host:port'
 
-Setup a Picodata database. Create the necessary data schema:
+Set up a Picodata database. Create the necessary tables:
 
     psql $PICODATA_CONNECTION_URL < migration.sql
 
-Build app:
+Run the app:
 
-    go build
+    go run main.go
 
-Run app:
-
-    ./crud
-
-## Add a string
+## Add a string value
 
     add 'Pico data'
 
@@ -28,10 +25,10 @@ Run app:
 
     list
 
-## Update an item
+## Update an item by its id
 
-    update 1 'Learn more go'
+    update 1 'Learn more Go'
 
-## Delete an item
+## Delete an item by its id
 
     remove 1

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -24,22 +25,22 @@ var (
 	ciFlag = flag.Bool("ci", false, "define is test has been running in CI")
 )
 
-func TestDiscovery(t *testing.T) {
+func TestProducer(t *testing.T) {
 	// Run locally
 	if !*ciFlag {
-		runTestContainers(t)
+		runProducerTestContainers(t)
 		return
 	}
 
 	// Run in CI
-	runTestDiscovery(t)
+	runProducerTestCI(t)
 }
 
 func createPsql(pass, host string) string {
 	return fmt.Sprintf("postgres://%s:%s@%s?sslmode=disable", adminUsername, pass, host)
 }
 
-func runTestContainers(t *testing.T) {
+func runProducerTestContainers(t *testing.T) {
 	newNetwork, err := network.New(context.Background())
 	require.NoError(t, err)
 	testcontainers.CleanupNetwork(t, newNetwork)
@@ -91,20 +92,44 @@ func runTestContainers(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	cfg, err := pgxpool.ParseConfig(createPsql(adminPassword, "0.0.0.0:55432"))
+	cfg, err := ParseConfig(createPsql(adminPassword, "0.0.0.0:55432"))
 	assert.NoError(t, err)
 
-	ctx := context.Background()
-
-	pool, err := discover(ctx, cfg)
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	assert.NoError(t, err)
-	assert.Equal(t, len(pool), 2)
-	addrs := []string{}
-	for _, conn := range pool {
-		addrs = append(addrs, fmt.Sprintf("%s:%d", conn.Config().ConnConfig.Host, conn.Config().ConnConfig.Port))
+
+	eventChan := make(chan event, 10)
+	eventSlice := make([]event, 0, 10)
+	stopChan := make(chan struct{})
+
+	prov := newConnectionProvider(pool)
+	producer := newStateProducer(prov)
+	go producer.runProducing(eventChan, stopChan)
+
+	go func() {
+		stop := time.After(2 * time.Second)
+		<-stop
+		close(stopChan)
+	}()
+
+	for event := range eventChan {
+		eventSlice = append(eventSlice, event)
 	}
-	assert.Contains(t, addrs, "0.0.0.0:55432")
-	assert.Contains(t, addrs, "0.0.0.0:55433")
+
+	assert.NotEmpty(t, eventSlice)
+
+	statusMap := map[string]int{
+		"0.0.0.0:55432": 0,
+		"0.0.0.0:55433": 0,
+	}
+
+	for _, event := range eventSlice {
+		statusMap[event.address]++
+	}
+
+	for _, events := range statusMap {
+		assert.NotZero(t, events)
+	}
 
 	err = c1.Terminate(context.Background())
 	assert.NoError(t, err)
@@ -112,19 +137,43 @@ func runTestContainers(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func runTestDiscovery(t *testing.T) {
-	ctx := context.Background()
-
+func runProducerTestCI(t *testing.T) {
 	cfg, err := pgxpool.ParseConfig(createPsql(os.Getenv("PICODATA_ADMIN_PASSWORD"), "picodata-1:5432"))
 	assert.NoError(t, err)
-	pool, err := discover(ctx, cfg)
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	assert.NoError(t, err)
 
-	assert.Equal(t, len(pool), 2)
-	addrs := []string{}
-	for _, conn := range pool {
-		addrs = append(addrs, fmt.Sprintf("%s:%d", conn.Config().ConnConfig.Host, conn.Config().ConnConfig.Port))
+	eventChan := make(chan event, 10)
+	eventSlice := make([]event, 0, 10)
+	stopChan := make(chan struct{})
+
+	prov := newConnectionProvider(pool)
+	producer := newStateProducer(prov)
+	go producer.runProducing(eventChan, stopChan)
+
+	go func() {
+		stop := time.After(2 * time.Second)
+		<-stop
+		close(stopChan)
+	}()
+
+	for event := range eventChan {
+		eventSlice = append(eventSlice, event)
 	}
-	assert.Contains(t, addrs, "picodata-1:5432")
-	assert.Contains(t, addrs, "picodata-2:5432")
+
+	assert.NotEmpty(t, eventSlice)
+
+	statusMap := map[string]int{
+		"picodata-1:5432": 0,
+		"picodata-2:5432": 0,
+	}
+
+	for _, event := range eventSlice {
+		statusMap[event.address]++
+	}
+
+	for _, occurence := range statusMap {
+		assert.NotZero(t, occurence)
+	}
 }

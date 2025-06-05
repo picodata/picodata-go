@@ -1,6 +1,6 @@
 module git.picodata.io/core/picodata-go
 
-go 1.23.3
+go 1.24.0
 
 require (
 	github.com/jackc/pgx/v5 v5.7.2

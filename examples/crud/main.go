@@ -10,7 +10,8 @@ import (
 	"strings"
 
 	picogo "git.picodata.io/core/picodata-go"
-	"git.picodata.io/core/picodata-go/strats"
+	"git.picodata.io/core/picodata-go/logger"
+	strats "git.picodata.io/core/picodata-go/strategies"
 )
 
 var pool *picogo.Pool
@@ -24,9 +25,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	pool, err = picogo.New(context.Background(), url, picogo.WithBalancerStrat(strats.RandomStrat))
+	pool, err = picogo.New(context.Background(), url, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to connection to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
@@ -112,34 +113,36 @@ func listTasks() error {
 
 func addTask(description string) error {
 	id := rand.Int32()
-	_, err := pool.Exec(context.Background(), "insert into tasks values($1::integer, $2::string)", id, description)
+	_, err := pool.Exec(context.Background(), "insert into tasks values($1, $2)", id, description)
 	return err
 }
 
 func updateTask(itemNum int32, description string) error {
-	_, err := pool.Exec(context.Background(), "update tasks set description=$1::string where id=$2::integer", description, itemNum)
+	_, err := pool.Exec(context.Background(), "update tasks set description=$1 where id=$2", description, itemNum)
 	return err
 }
 
 func removeTask(itemNum int32) error {
-	_, err := pool.Exec(context.Background(), "delete from tasks where id=$1::integer", itemNum)
+	_, err := pool.Exec(context.Background(), "delete from tasks where id=$1", itemNum)
 	return err
 }
 
 func printHelp() {
 	fmt.Print(`
+
 Commands:
 
-  help
-  list
-  add string
-  update id string
-  remove id
-  exit
+	help
+	list
+	add string
+	update id string
+	remove id
+	exit
 
 Example:
 
-  add 'pico data'
-  list
+	add 'pico data'
+	list
+
 `)
 }
