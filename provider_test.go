@@ -18,7 +18,7 @@ func (ms mockBalancerStrategy) Next(current *uint64, size uint64) uint64 {
 }
 
 func (ms mockBalancerStrategy) Type() string {
-	return "MockStrat"
+	return "Mock"
 }
 
 func newMockPool(host string, port int) *pgxpool.Pool {
@@ -38,7 +38,20 @@ func TestProvider(t *testing.T) {
 		assert.Len(t, prov.conns(), 1)
 		assert.NotNil(t, prov.connsMap())
 		assert.Len(t, prov.connsMap(), 1)
+	})
 
+	t.Run("TestSetBalanceStrategy", func(t *testing.T) {
+		pool1 := newMockPool("127.0.0.1", 5432)
+		pool2 := newMockPool("127.0.0.1", 5433)
+
+		prov := newConnectionProvider(pool1)
+		prov.connections = append(prov.connections, pool2)
+
+		prov.setBalanceStrategy(mockBalancerStrategy{})
+		// Always return second connection
+		for range 5 {
+			assert.Equal(t, pool2, prov.nextConnection())
+		}
 	})
 
 	t.Run("TestNextConection", func(t *testing.T) {
@@ -55,6 +68,80 @@ func TestProvider(t *testing.T) {
 		assert.Equal(t, pool1, prov.nextConnection())
 	})
 
+	t.Run("TestNextConnectionConcurrent", func(t *testing.T) {
+		addr := "addr"
+		ports := []int{0, 1, 2}
+		host1 := fmt.Sprintf("%s:%d", addr, ports[0])
+		host2 := fmt.Sprintf("%s:%d", addr, ports[1])
+		host3 := fmt.Sprintf("%s:%d", addr, ports[2])
+
+		pool1 := newMockPool(addr, ports[0])
+		pool2 := newMockPool(addr, ports[1])
+		pool3 := newMockPool(addr, ports[2])
+
+		prov := newConnectionProvider(pool1)
+		prov.connections = append(prov.connections, pool2)
+		prov.connectionsMap[host2] = 1
+		prov.connections = append(prov.connections, pool3)
+		prov.connectionsMap[host3] = 2
+
+		goroutines := 200
+
+		wg := sync.WaitGroup{}
+
+		wg.Add(goroutines)
+		for range goroutines {
+			go func() {
+				defer wg.Done()
+				conn := prov.nextConnection()
+				assert.NotNil(t, conn)
+			}()
+		}
+
+		type action struct {
+			host   string
+			action string
+		}
+		removeAction := "remove"
+		addAction := "add"
+		actions := []action{{host3, removeAction}, {host2, removeAction}, {host3, addAction}, {host1, removeAction}}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, action := range actions {
+				switch action.action {
+				case removeAction:
+					switch action.host {
+					case host1:
+						prov.removeConn(host1)
+					case host2:
+						prov.removeConn(host2)
+					case host3:
+						prov.removeConn(host3)
+					}
+				case addAction:
+					switch action.host {
+					case host1:
+						prov.addConn(host1)
+					case host2:
+						prov.addConn(host2)
+					case host3:
+						prov.addConn(host3)
+					}
+				}
+			}
+		}()
+
+		wg.Wait()
+
+		assert.Len(t, prov.conns(), 1)
+		assert.Equal(t, fmt.Sprintf("%s:%d", prov.conns()[0].Config().ConnConfig.Host, prov.conns()[0].Config().ConnConfig.Port), host3)
+		assert.Len(t, prov.connsMap(), 1)
+		_, ok := prov.connsMap()[host3]
+		assert.True(t, ok)
+	})
+
 	t.Run("TestAddConnectionAlreadyAdded", func(t *testing.T) {
 		pool := newMockPool("127.0.0.1", 5432)
 		prov := newConnectionProvider(pool)
@@ -69,11 +156,12 @@ func TestProvider(t *testing.T) {
 		prov := newConnectionProvider(pool)
 
 		prov.removeConn("127.0.0.1:5432")
+
 		assert.Len(t, prov.conns(), 0)
 		assert.Len(t, prov.connsMap(), 0)
 	})
 
-	t.Run("TestRemoveConnectionLast", func(t *testing.T) {
+	t.Run("TestRemoveConnectionLastPosition", func(t *testing.T) {
 		host := "host"
 		ports := []int{0, 1, 2}
 
@@ -87,6 +175,7 @@ func TestProvider(t *testing.T) {
 		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])] = 2
 
 		prov.removeConn(fmt.Sprintf("%s:%d", host, ports[2]))
+
 		assert.Len(t, prov.conns(), 2)
 		assert.Len(t, prov.connsMap(), 2)
 
@@ -95,7 +184,7 @@ func TestProvider(t *testing.T) {
 		}
 	})
 
-	t.Run("TestRemoveConnectionMiddle", func(t *testing.T) {
+	t.Run("TestRemoveConnectionMiddlePosition", func(t *testing.T) {
 		host := "host"
 		ports := []int{0, 1, 2}
 
@@ -109,76 +198,10 @@ func TestProvider(t *testing.T) {
 		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])] = 2
 
 		prov.removeConn(fmt.Sprintf("%s:%d", host, ports[1]))
+
 		assert.Len(t, prov.conns(), 2)
 		assert.Len(t, prov.connsMap(), 2)
 		assert.Equal(t, prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[0])], 0)
 		assert.Equal(t, prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])], 1)
 	})
-
-	t.Run("TestSetBalanceStrategy", func(t *testing.T) {
-		pool1 := newMockPool("127.0.0.1", 5432)
-		pool2 := newMockPool("127.0.0.1", 5433)
-
-		prov := newConnectionProvider(pool1)
-		prov.connections = append(prov.connections, pool2)
-
-		prov.setBalanceStrategy(mockBalancerStrategy{})
-		// Always return second connection
-		assert.Equal(t, pool2, prov.nextConnection())
-		assert.Equal(t, pool2, prov.nextConnection())
-	})
-
-	t.Run("TestConcurrentnextConection", func(t *testing.T) {
-		testPort1 := 0
-		testPort2 := 1
-
-		pool1 := newMockPool("127.0.0.1", testPort1)
-		pool2 := newMockPool("127.0.0.1", testPort2)
-		prov := newConnectionProvider(pool1)
-		prov.connections = append(prov.connections, pool2)
-
-		nOfWorkers := 1000
-		results := make(chan uint16, nOfWorkers)
-
-		var wg sync.WaitGroup
-		for range nOfWorkers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				conn := prov.nextConnection()
-				results <- conn.Config().ConnConfig.Port
-			}()
-		}
-
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
-
-		// Collect all results
-		resultsSlice := make([]uint16, 0, nOfWorkers)
-		for v := range results {
-			resultsSlice = append(resultsSlice, v)
-		}
-
-		assert.Equal(t, len(resultsSlice), nOfWorkers)
-
-		// Count occurrences of each port
-		count1, count2 := 0, 0
-		for _, port := range resultsSlice {
-			switch port {
-			case uint16(testPort1):
-				count1++
-			case uint16(testPort2):
-				count2++
-			}
-		}
-
-		// Verify each port is used exactly 500 times
-		expected := nOfWorkers / len(prov.conns())
-		if count1 != expected || count2 != expected {
-			t.Errorf("Expected %d each, got %d: %d, %d: %d", expected, testPort1, count1, testPort2, count2)
-		}
-	})
-
 }

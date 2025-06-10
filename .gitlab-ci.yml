@@ -53,7 +53,8 @@ test-unit:
     - <<: *cache-node
       policy: pull
   script:
-    - ./go/bin/go test -run "TestProvider" .
+    - ./go/bin/go test ./strategies
+    - ./go/bin/go test -run "TestProvider" ./
 
 test-integration:
   stage: test

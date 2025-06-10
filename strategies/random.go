@@ -14,10 +14,7 @@ func NewRandomStrategy() randomStrategy {
 }
 
 func (r randomStrategy) Next(current *uint64, size uint64) uint64 {
-	prev := atomic.LoadUint64(current)
-	newVal := rand.Uint64() % size
-	atomic.StoreUint64(current, newVal)
-	return prev
+	return atomic.SwapUint64(current, rand.Uint64()%size)
 }
 
 func (r randomStrategy) Type() string {

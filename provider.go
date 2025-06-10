@@ -18,8 +18,10 @@ type connectionProvider struct {
 	current           uint64
 	connectionsConfig *pgxpool.Config
 	connections       []*pgxpool.Pool
-	connectionsMap    map[string]int
-	balanceStrategy   strategies.BalanceStrategy
+	// Key: instance address
+	// Value: index of corresponding *pgxpool.Pool in [connectionProvider] connections slice
+	connectionsMap  map[string]int
+	balanceStrategy strategies.BalanceStrategy
 }
 
 func newConnectionProvider(initConn *pgxpool.Pool) *connectionProvider {
@@ -44,10 +46,13 @@ func (p *connectionProvider) setBalanceStrategy(s strategies.BalanceStrategy) {
 }
 
 func (p *connectionProvider) nextConnection() *pgxpool.Pool {
+	const op = "provider: nextConnection"
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if len(p.connections) == 0 {
+		logger.Log(logger.LevelWarn, "%s: connections slice is empty", op)
 		return nil
 	}
 
@@ -69,14 +74,16 @@ func (p *connectionProvider) connsMap() map[string]*pgxpool.Pool {
 	defer p.mu.RUnlock()
 
 	connectionsMap := make(map[string]*pgxpool.Pool, len(p.connectionsMap))
-	for name, index := range p.connectionsMap {
-		connectionsMap[name] = p.connections[index]
+	for address, index := range p.connectionsMap {
+		connectionsMap[address] = p.connections[index]
 	}
 
 	return connectionsMap
 }
 
 func (p *connectionProvider) addConn(address string) error {
+	const op = "provider: addConn"
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -93,9 +100,10 @@ func (p *connectionProvider) addConn(address string) error {
 	// Convert port from string to integer
 	port, err := strconv.Atoi(hostAndPort[1])
 	if err != nil {
-		return fmt.Errorf("provider: addConn: cant convert port %s to int: %v", hostAndPort[1], err)
+		return fmt.Errorf("%s: cant convert port %s to int: %w", op, hostAndPort[1], err)
 	}
 
+	// Picodata provides valid port, so casting is safe
 	connCfg.ConnConfig.Port = uint16(port)
 
 	conn, err := pgxpool.NewWithConfig(context.Background(), connCfg)
@@ -103,37 +111,42 @@ func (p *connectionProvider) addConn(address string) error {
 		return err
 	}
 
+	// Add connection to the connection pool
 	p.connections = append(p.connections, conn)
 	p.connectionsMap[address] = len(p.connections) - 1
-	logger.Log(logger.LevelDebug, "provider: addConn: %s", address)
+
+	logger.Log(logger.LevelDebug, "%s: %s", op, address)
 
 	return nil
 }
 
 func (p *connectionProvider) removeConn(address string) {
+	const op = "provider: removeConn"
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// If connection address doesn't exists -> return
+	// If connection with address doesn't exist -> return
 	index, ok := p.connectionsMap[address]
 	if !ok {
 		return
 	}
 
-	// Get last connection address
+	// Get address of last connection in pool
 	lastConnAddr := fmt.Sprintf("%s:%d", p.connections[len(p.connections)-1].Config().ConnConfig.Host, p.connections[len(p.connections)-1].Config().ConnConfig.Port)
 
-	// Remove connection info from connMap
+	// Remove entry about connection from connMap
 	delete(p.connectionsMap, address)
 
+	// If deleted connection isn't last in pool
 	if index != len(p.connections)-1 {
-		// Delete connection from connSlice by truncating it
+		// Move last connection to the position of deleted one
 		p.connections[index] = p.connections[len(p.connections)-1]
-		// Update connMap
+		// Update index of last connection in connMap
 		p.connectionsMap[lastConnAddr] = index
 	}
-
+	// Delete connection from connSlice by truncating it
 	p.connections = p.connections[:len(p.connections)-1]
 
-	logger.Log(logger.LevelDebug, "provider: removeConn: %s", address)
+	logger.Log(logger.LevelDebug, "%s: %s", op, address)
 }
