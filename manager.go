@@ -13,16 +13,18 @@ func newTopologyManager(provider *connectionProvider) *topologyManager {
 }
 
 func (m *topologyManager) runProcessing(eventsChan <-chan event) {
+	const op = "manager: runProcessing"
+
 	for event := range eventsChan {
 		switch event.state {
 		case stateOnline:
 			if err := m.provider.addConn(event.address); err != nil {
-				logger.Log(logger.LevelError, "manager: runProcessing: error adding new connection: %v", err)
+				logger.Log(logger.LevelError, "%s: %v", op, err)
 			}
 		case stateOffline:
 			m.provider.removeConn(event.address)
 		default:
-			logger.Log(logger.LevelWarn, "manager: runProcessing: undefined state %q for addr %q", event.state, event.address)
+			logger.Log(logger.LevelWarn, "%s: undefined state %q for %q", op, event.state, event.address)
 		}
 	}
 }

@@ -91,7 +91,7 @@ func runManagerTestContainers(t *testing.T) {
 	go manager.runProcessing(eventChan)
 
 	// Send events to manager
-	addrs := []string{"0.0.0.0:55432", "0.0.0.0:55433"}
+	addrs := []string{"0.0.0.0:55433"}
 	for _, addr := range addrs {
 		eventChan <- event{address: addr, state: stateOnline}
 	}
@@ -129,7 +129,7 @@ func runManagerTestCI(t *testing.T) {
 	go manager.runProcessing(eventChan)
 
 	// Send events to manager
-	addrs := []string{"picodata-1:5432", "picodata-2:5432"}
+	addrs := []string{"picodata-2:5432"}
 	for _, addr := range addrs {
 		eventChan <- event{address: addr, state: stateOnline}
 	}

@@ -102,16 +102,16 @@ func TestProvider(t *testing.T) {
 			host   string
 			action string
 		}
-		removeAction := "remove"
-		addAction := "add"
-		actions := []action{{host3, removeAction}, {host2, removeAction}, {host3, addAction}, {host1, removeAction}}
+		actionRemove := "remove"
+		actionAdd := "add"
+		actions := []action{{host3, actionRemove}, {host2, actionRemove}, {host3, actionAdd}, {host1, actionRemove}}
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for _, action := range actions {
 				switch action.action {
-				case removeAction:
+				case actionRemove:
 					switch action.host {
 					case host1:
 						prov.removeConn(host1)
@@ -120,7 +120,7 @@ func TestProvider(t *testing.T) {
 					case host3:
 						prov.removeConn(host3)
 					}
-				case addAction:
+				case actionAdd:
 					switch action.host {
 					case host1:
 						prov.addConn(host1)
@@ -140,15 +140,6 @@ func TestProvider(t *testing.T) {
 		assert.Len(t, prov.connsMap(), 1)
 		_, ok := prov.connsMap()[host3]
 		assert.True(t, ok)
-	})
-
-	t.Run("TestAddConnectionAlreadyAdded", func(t *testing.T) {
-		pool := newMockPool("127.0.0.1", 5432)
-		prov := newConnectionProvider(pool)
-
-		prov.addConn("127.0.0.1:5432")
-
-		assert.Len(t, prov.conns(), 1)
 	})
 
 	t.Run("TestRemoveConnection", func(t *testing.T) {

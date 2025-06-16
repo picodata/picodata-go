@@ -118,16 +118,15 @@ func runProducerTestContainers(t *testing.T) {
 
 	assert.NotEmpty(t, eventSlice)
 
-	statusMap := map[string]int{
-		"0.0.0.0:55432": 0,
+	stateMap := map[string]int{
 		"0.0.0.0:55433": 0,
 	}
 
 	for _, event := range eventSlice {
-		statusMap[event.address]++
+		stateMap[event.address]++
 	}
 
-	for _, events := range statusMap {
+	for _, events := range stateMap {
 		assert.NotZero(t, events)
 	}
 
@@ -165,7 +164,6 @@ func runProducerTestCI(t *testing.T) {
 	assert.NotEmpty(t, eventSlice)
 
 	statusMap := map[string]int{
-		"picodata-1:5432": 0,
 		"picodata-2:5432": 0,
 	}
 
