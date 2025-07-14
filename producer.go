@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"git.picodata.io/core/picodata-go/logger"
+	"github.com/picodata/picodata-go/logger"
 )
 
 const (

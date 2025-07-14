@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	picogo "git.picodata.io/core/picodata-go"
-	"git.picodata.io/core/picodata-go/logger"
-	strats "git.picodata.io/core/picodata-go/strategies"
+	picogo "github.com/picodata/picodata-go"
+	"github.com/picodata/picodata-go/logger"
+	strats "github.com/picodata/picodata-go/strategies"
 )
 
 var pool *picogo.Pool

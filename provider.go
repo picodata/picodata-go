@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
-	"git.picodata.io/core/picodata-go/logger"
-	"git.picodata.io/core/picodata-go/strategies"
+	"github.com/picodata/picodata-go/logger"
+	"github.com/picodata/picodata-go/strategies"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )

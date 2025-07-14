@@ -1,4 +1,4 @@
-module git.picodata.io/core/picodata-go
+module github.com/picodata/picodata-go
 
 go 1.24.0
 

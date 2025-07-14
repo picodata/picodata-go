@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"os"
 
-	picogo "git.picodata.io/core/picodata-go"
-	logger "git.picodata.io/core/picodata-go/logger"
-	strats "git.picodata.io/core/picodata-go/strategies"
+	picogo "github.com/picodata/picodata-go"
+	logger "github.com/picodata/picodata-go/logger"
+	strats "github.com/picodata/picodata-go/strategies"
 )
 
 func main() {
