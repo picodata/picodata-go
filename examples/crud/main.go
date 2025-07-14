@@ -14,26 +14,39 @@ import (
 	strats "github.com/picodata/picodata-go/strategies"
 )
 
+const (
+	// In production, you may use environment variable.
+	// We expose connection url here to keep example simple.
+	CONNECTION_URL = "postgres://admin:T0psecret@localhost:4327"
+
+	// Query to create table to store and get data from.
+	QUERY_CREATE_TASKS_TABLE = "create table if not exists tasks (id integer primary key,description text not null)"
+)
+
+// Pool is a global variable to keep example simple.
 var pool *picogo.Pool
 
 func main() {
 	var err error
 
-	url := os.Getenv("PICODATA_CONNECTION_URL")
-	if url == "" {
-		fmt.Fprint(os.Stderr, "PICODATA_CONNECTION_URL is not set\n")
-		os.Exit(1)
-	}
-
-	pool, err = picogo.New(context.Background(), url, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
+	// Connect to the Picodata database.
+	pool, err = picogo.New(context.Background(), CONNECTION_URL, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
 
+	// Create test table "tasks" for storing and reading data.
+	_, err = pool.Exec(context.Background(), QUERY_CREATE_TASKS_TABLE)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Unable to create table: %v\n", err)
+		os.Exit(1)
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 
+	// Read user's commands from terminal and execute them.
 	for {
 		fmt.Print("(db) > ")
 		line, err := reader.ReadString('\n')
@@ -46,6 +59,7 @@ func main() {
 
 		args := strings.Split(line, " ")
 
+		// Perform CRUD operations.
 		switch args[0] {
 		case "help":
 			printHelp()
