@@ -103,7 +103,6 @@ func runManagerTestContainers(t *testing.T) {
 	go func() {
 		time.Sleep(2 * time.Second)
 		wg.Done()
-		return
 	}()
 	wg.Wait()
 
@@ -141,7 +140,6 @@ func runManagerTestCI(t *testing.T) {
 	go func() {
 		time.Sleep(2 * time.Second)
 		wg.Done()
-		return
 	}()
 	wg.Wait()
 

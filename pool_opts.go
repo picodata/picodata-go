@@ -1,8 +1,8 @@
 package picodata
 
 import (
-	"git.picodata.io/core/picodata-go/logger"
-	"git.picodata.io/core/picodata-go/strategies"
+	"github.com/picodata/picodata-go/logger"
+	"github.com/picodata/picodata-go/strategies"
 )
 
 type PoolOption func(*Pool) error
