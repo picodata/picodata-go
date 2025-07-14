@@ -5,13 +5,9 @@ to a Picodata database.
 
 # Usage
 
-Export the environment variable:
+Set up a Picodata database. Run docker images:
 
-    export PICODATA_CONNECTION_URL='postgres://login:pass@host:port'
-
-Set up a Picodata database. Create the necessary tables:
-
-    psql $PICODATA_CONNECTION_URL < migration.sql
+    docker-compose up -d
 
 Run the app:
 
@@ -27,8 +23,8 @@ Run the app:
 
 ## Update an item by its id
 
-    update 1 'Learn more Go'
+    update 433242231 'Learn more Go'
 
 ## Delete an item by its id
 
-    remove 1
+    remove 433242231
