@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/picodata/picodata-go/logger"
 )
 
@@ -26,18 +27,32 @@ type connState struct {
 }
 
 type stateProducer struct {
-	provider *connectionProvider
-	filter   *stateFilter
+	provider    *connectionProvider
+	serviceConn *pgxpool.Pool
+	filter      *stateFilter
 }
 
-func newStateProducer(provider *connectionProvider) *stateProducer {
+func newStateProducer(provider *connectionProvider, serviceConnString string) (*stateProducer, error) {
 	initConnConfig := provider.config()
 	initConnAddr := fmt.Sprintf("%s:%d", initConnConfig.ConnConfig.Host, initConnConfig.ConnConfig.Port)
 
-	return &stateProducer{
-		provider: provider,
-		filter:   newStateFilter(initConnAddr, stateOnline),
+	var serviceConn *pgxpool.Pool
+	if len(serviceConnString) != 0 {
+
+		ctx, cf := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cf()
+		sc, err := pgxpool.New(ctx, serviceConnString)
+		if err != nil {
+			return nil, fmt.Errorf("cant create connection with service instance %s: %v", serviceConnString, err)
+		}
+		serviceConn = sc
 	}
+
+	return &stateProducer{
+		provider:    provider,
+		serviceConn: serviceConn,
+		filter:      newStateFilter(initConnAddr, stateOnline),
+	}, nil
 }
 
 func (p *stateProducer) runProducing(eventChan chan<- event, stopChan chan struct{}) {
@@ -76,8 +91,16 @@ func (p *stateProducer) getConnStates() ([]connState, error) {
 
 	// TODO: Maybe we need a separate balancer for producer?
 	// In that case, we will also need to track pool length in two places.
-	conn := p.provider.nextConnection()
-	rows, err := conn.Query(context.Background(), connsStateQuery)
+	ctx, cf := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cf()
+	var conn *pgxpool.Pool
+	if p.serviceConn != nil {
+		conn = p.serviceConn
+	} else {
+		conn = p.provider.nextConnection()
+	}
+
+	rows, err := conn.Query(ctx, connsStateQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -88,15 +111,19 @@ func (p *stateProducer) getConnStates() ([]connState, error) {
 		var connFetchedState []any // contains [string, int]
 
 		if err := rows.Scan(&connAddr, &connFetchedState); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 
 		connStateStr, ok := connFetchedState[0].(string)
 		if !ok {
-			return nil, fmt.Errorf("%s: %s state must be a string, but has type %s", op, connAddr, fmt.Sprintf("%T", connFetchedState[0]))
+			return nil, fmt.Errorf("%s: %s state must be a string, but has type %T", op, connAddr, connFetchedState[0])
 		}
 
 		connsState = append(connsState, connState{address: connAddr, currentState: connStateStr})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
 	return connsState, nil

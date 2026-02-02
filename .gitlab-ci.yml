@@ -1,6 +1,6 @@
 default:
   tags:
-    - proxmox
+    - docker-k8s
 
 stages:
   - deps
