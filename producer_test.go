@@ -103,7 +103,7 @@ func runProducerTestContainers(t *testing.T) {
 	stopChan := make(chan struct{})
 
 	prov := newConnectionProvider(pool, 1)
-	producer, err := newStateProducer(prov, "0.0.0.0:55432")
+	producer, err := newStateProducer(prov, createPsql(adminPassword, "0.0.0.0:55432"))
 	assert.NoError(t, err)
 	go producer.runProducing(eventChan, stopChan)
 
@@ -149,7 +149,7 @@ func runProducerTestCI(t *testing.T) {
 	stopChan := make(chan struct{})
 
 	prov := newConnectionProvider(pool, 1)
-	producer, err := newStateProducer(prov, "picodata-1:5432")
+	producer, err := newStateProducer(prov, createPsql(os.Getenv("PICODATA_ADMIN_PASSWORD"), "picodata-1:5432"))
 	assert.NoError(t, err)
 	go producer.runProducing(eventChan, stopChan)
 
