@@ -86,7 +86,7 @@ func runManagerTestContainers(t *testing.T) {
 
 	eventChan := make(chan event, 10)
 
-	prov := newConnectionProvider(pool)
+	prov := newConnectionProvider(pool, 1)
 	manager := newTopologyManager(prov)
 	go manager.runProcessing(eventChan)
 
@@ -123,7 +123,7 @@ func runManagerTestCI(t *testing.T) {
 
 	eventChan := make(chan event, 10)
 
-	prov := newConnectionProvider(pool)
+	prov := newConnectionProvider(pool, 1)
 	manager := newTopologyManager(prov)
 	go manager.runProcessing(eventChan)
 

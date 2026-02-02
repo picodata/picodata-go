@@ -32,7 +32,7 @@ func newMockPool(host string, port int) *pgxpool.Pool {
 func TestProvider(t *testing.T) {
 	t.Run("TestNewConnectionProvider", func(t *testing.T) {
 		pool := newMockPool("127.0.0.1", 5432)
-		prov := newConnectionProvider(pool)
+		prov := newConnectionProvider(pool, 1)
 
 		require.NotNil(t, prov)
 		assert.Len(t, prov.conns(), 1)
@@ -44,7 +44,7 @@ func TestProvider(t *testing.T) {
 		pool1 := newMockPool("127.0.0.1", 5432)
 		pool2 := newMockPool("127.0.0.1", 5433)
 
-		prov := newConnectionProvider(pool1)
+		prov := newConnectionProvider(pool1, 1)
 		prov.connections = append(prov.connections, pool2)
 
 		prov.setBalanceStrategy(mockBalancerStrategy{})
@@ -58,7 +58,7 @@ func TestProvider(t *testing.T) {
 		pool1 := newMockPool("127.0.0.1", 5432)
 		pool2 := newMockPool("127.0.0.1", 5433)
 
-		prov := newConnectionProvider(pool1)
+		prov := newConnectionProvider(pool1, 1)
 		// Because we can
 		prov.connections = append(prov.connections, pool2)
 
@@ -79,7 +79,7 @@ func TestProvider(t *testing.T) {
 		pool2 := newMockPool(addr, ports[1])
 		pool3 := newMockPool(addr, ports[2])
 
-		prov := newConnectionProvider(pool1)
+		prov := newConnectionProvider(pool1, 1)
 		prov.connections = append(prov.connections, pool2)
 		prov.connectionsMap[host2] = 1
 		prov.connections = append(prov.connections, pool3)
@@ -144,7 +144,7 @@ func TestProvider(t *testing.T) {
 
 	t.Run("TestRemoveConnection", func(t *testing.T) {
 		pool := newMockPool("127.0.0.1", 5432)
-		prov := newConnectionProvider(pool)
+		prov := newConnectionProvider(pool, 1)
 
 		prov.removeConn("127.0.0.1:5432")
 
@@ -159,7 +159,7 @@ func TestProvider(t *testing.T) {
 		pool1 := newMockPool(host, ports[0])
 		pool2 := newMockPool(host, ports[1])
 		pool3 := newMockPool(host, ports[2])
-		prov := newConnectionProvider(pool1)
+		prov := newConnectionProvider(pool1, 1)
 		prov.connections = append(prov.connections, pool2)
 		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[1])] = 1
 		prov.connections = append(prov.connections, pool3)
@@ -182,7 +182,7 @@ func TestProvider(t *testing.T) {
 		pool1 := newMockPool(host, ports[0])
 		pool2 := newMockPool(host, ports[1])
 		pool3 := newMockPool(host, ports[2])
-		prov := newConnectionProvider(pool1)
+		prov := newConnectionProvider(pool1, 1)
 		prov.connections = append(prov.connections, pool2)
 		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[1])] = 1
 		prov.connections = append(prov.connections, pool3)

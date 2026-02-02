@@ -102,8 +102,9 @@ func runProducerTestContainers(t *testing.T) {
 	eventSlice := make([]event, 0, 10)
 	stopChan := make(chan struct{})
 
-	prov := newConnectionProvider(pool)
-	producer := newStateProducer(prov)
+	prov := newConnectionProvider(pool, 1)
+	producer, err := newStateProducer(prov, "0.0.0.0:55432")
+	assert.NoError(t, err)
 	go producer.runProducing(eventChan, stopChan)
 
 	go func() {
@@ -147,8 +148,9 @@ func runProducerTestCI(t *testing.T) {
 	eventSlice := make([]event, 0, 10)
 	stopChan := make(chan struct{})
 
-	prov := newConnectionProvider(pool)
-	producer := newStateProducer(prov)
+	prov := newConnectionProvider(pool, 1)
+	producer, err := newStateProducer(prov, "picodata-1:5432")
+	assert.NoError(t, err)
 	go producer.runProducing(eventChan, stopChan)
 
 	go func() {

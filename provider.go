@@ -20,11 +20,12 @@ type connectionProvider struct {
 	connections       []*pgxpool.Pool
 	// Key: instance address
 	// Value: index of corresponding *pgxpool.Pool in [connectionProvider] connections slice
-	connectionsMap  map[string]int
-	balanceStrategy strategies.BalanceStrategy
+	connectionsMap        map[string]int
+	balanceStrategy       strategies.BalanceStrategy
+	connectionPerInstance int32
 }
 
-func newConnectionProvider(initConn *pgxpool.Pool) *connectionProvider {
+func newConnectionProvider(initConn *pgxpool.Pool, connPerInstance int32) *connectionProvider {
 	connPool := make([]*pgxpool.Pool, 0, 1)
 	connMap := make(map[string]int, 1)
 
@@ -33,11 +34,12 @@ func newConnectionProvider(initConn *pgxpool.Pool) *connectionProvider {
 	connMap[addr] = 0
 
 	return &connectionProvider{
-		current:           0,
-		connectionsConfig: initConn.Config().Copy(),
-		connections:       connPool,
-		connectionsMap:    connMap,
-		balanceStrategy:   strategies.NewRoundRobinStrategy(),
+		current:               0,
+		connectionsConfig:     initConn.Config().Copy(),
+		connections:           connPool,
+		connectionsMap:        connMap,
+		balanceStrategy:       strategies.NewRoundRobinStrategy(),
+		connectionPerInstance: connPerInstance,
 	}
 }
 
@@ -103,6 +105,9 @@ func (p *connectionProvider) addConn(address string) error {
 	connCfg := p.connectionsConfig.Copy()
 	hostAndPort := strings.Split(address, ":")
 	connCfg.ConnConfig.Host = hostAndPort[0]
+	if p.connectionPerInstance != 0 {
+		connCfg.MaxConns = int32(p.connectionPerInstance)
+	}
 
 	// Convert port from string to integer
 	port, err := strconv.Atoi(hostAndPort[1])

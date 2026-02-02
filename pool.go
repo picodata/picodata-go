@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/picodata/picodata-go/logger"
 )
 
 // Pool allows for connection reuse.
@@ -43,30 +44,53 @@ func New(ctx context.Context, connString string, opts ...PoolOption) (*Pool, err
 func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOption) (*Pool, error) {
 	const op = "pool: NewWithConfig"
 
+	poolOpts := &poolOpts{}
+	for i, opt := range opts {
+		if err := opt(poolOpts); err != nil {
+			return nil, fmt.Errorf("%s: applying option %d: %w", op, i+1, err)
+		}
+	}
+
+	if poolOpts.logger != nil {
+		logger.SetDefaultLogger(poolOpts.logger)
+	}
+
+	if poolOpts.logLevel > 0 {
+		logger.SetLevel(poolOpts.logLevel)
+	}
+
 	initConn, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	// TODO: research the most suitable capacity
-	eventChan := make(chan event, 10)
 	stopChan := make(chan struct{})
-
-	provider := newConnectionProvider(initConn)
-
-	manager := newTopologyManager(provider)
-	go manager.runProcessing(eventChan)
-
-	producer := newStateProducer(provider)
-	go producer.runProducing(eventChan, stopChan)
-
-	connPool := &Pool{provider: provider, manager: manager, producer: producer, stopChan: stopChan}
-
-	for i, opt := range opts {
-		if err := opt(connPool); err != nil {
-			return nil, fmt.Errorf("%s: applying option %d: %w", op, i+1, err)
-		}
+	var connPool *Pool
+	provider := newConnectionProvider(initConn, poolOpts.maxConnsPerInstance)
+	if poolOpts.balanceStrategy != nil {
+		provider.setBalanceStrategy(poolOpts.balanceStrategy)
 	}
+
+	if err := initialDiscovery(ctx, provider); err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	var manager *topologyManager
+	var producer *stateProducer
+	if !poolOpts.disableTopologyManager {
+		//TODO: research suitable capacity for eventChan
+		eventChan := make(chan event, 10)
+		manager = newTopologyManager(provider)
+
+		producer, err = newStateProducer(provider, poolOpts.serviceConnAddress)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		go manager.runProcessing(eventChan)
+		go producer.runProducing(eventChan, stopChan)
+	}
+
+	connPool = &Pool{provider: provider, manager: manager, producer: producer, stopChan: stopChan}
 
 	return connPool, nil
 }
