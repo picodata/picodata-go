@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/picodata/picodata-go/logger"
+	"git.picodata.io/core/drivers/picodata-go/logger"
 )
 
 const (

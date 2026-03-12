@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	picogo "github.com/picodata/picodata-go"
-	"github.com/picodata/picodata-go/logger"
-	strats "github.com/picodata/picodata-go/strategies"
+	picogo "git.picodata.io/core/drivers/picodata-go"
+	"git.picodata.io/core/drivers/picodata-go/logger"
+	strats "git.picodata.io/core/drivers/picodata-go/strategies"
 )
 
 const (

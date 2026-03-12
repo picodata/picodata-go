@@ -20,14 +20,14 @@ import (
 	"fmt"
 	"os"
 
-	picogo "github.com/picodata/picodata-go"
-	logger "github.com/picodata/picodata-go/logger"
-	strats "github.com/picodata/picodata-go/strategies"
+	picogo "git.picodata.io/core/drivers/picodata-go"
+	logger "git.picodata.io/core/drivers/picodata-go/logger"
+	strats "git.picodata.io/core/drivers/picodata-go/strategies"
 )
 
 func main() {
 	// export PICODATA_CONNECTION_URL=postgres://username:password@host:port
-	pool, err := picogo.New(context.Background(), os.Getenv("PICODATA_CONNECTION_URL"), picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
+	pool, err := picogo.New(context.Background(), os.Getenv("PICODATA_CONNECTION_URL"),  picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)

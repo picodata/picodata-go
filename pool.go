@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/picodata/picodata-go/logger"
+	"git.picodata.io/core/drivers/picodata-go/logger"
 )
 
 // Pool allows for connection reuse.

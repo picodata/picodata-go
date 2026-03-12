@@ -3,8 +3,8 @@ package picodata
 import (
 	"fmt"
 
-	"github.com/picodata/picodata-go/logger"
-	"github.com/picodata/picodata-go/strategies"
+	"git.picodata.io/core/drivers/picodata-go/logger"
+	"git.picodata.io/core/drivers/picodata-go/strategies"
 )
 
 type poolOpts struct {

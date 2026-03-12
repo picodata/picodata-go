@@ -1,6 +1,6 @@
 package picodata
 
-import "github.com/picodata/picodata-go/logger"
+import "git.picodata.io/core/drivers/picodata-go/logger"
 
 type topologyManager struct {
 	provider *connectionProvider

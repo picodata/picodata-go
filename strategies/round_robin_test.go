@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/picodata/picodata-go/strategies"
+	"git.picodata.io/core/drivers/picodata-go/strategies"
 	"github.com/stretchr/testify/assert"
 )
 
