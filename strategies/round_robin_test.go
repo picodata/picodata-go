@@ -3,6 +3,7 @@ package strategies_test
 import (
 	"sync"
 	"testing"
+	"math"
 
 	"git.picodata.io/core/drivers/picodata-go/strategies"
 	"github.com/stretchr/testify/assert"
@@ -75,7 +76,7 @@ func TestRoundRobinStrategy(t *testing.T) {
 	})
 
 	t.Run("TestNextAfterMaxIndex", func(t *testing.T) {
-		var current uint64 = ^uint64(0) // Max uint64
+		current := uint64(math.MaxUint64)
 		strategy := strategies.NewRoundRobinStrategy()
 		poolSize := uint64(2)
 

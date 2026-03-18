@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"git.picodata.io/core/drivers/picodata-go/logger"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (

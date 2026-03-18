@@ -123,11 +123,11 @@ func TestProvider(t *testing.T) {
 				case actionAdd:
 					switch action.host {
 					case host1:
-						prov.addConn(host1)
+						_ = prov.addConn(host1)
 					case host2:
-						prov.addConn(host2)
+						_ = prov.addConn(host2)
 					case host3:
-						prov.addConn(host3)
+						_ = prov.addConn(host3)
 					}
 				}
 			}

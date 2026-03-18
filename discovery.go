@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"git.picodata.io/core/drivers/picodata-go/logger"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // initialDiscovery performs a one-time topology discovery and populates

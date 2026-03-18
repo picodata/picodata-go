@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"sync"
 
+	"git.picodata.io/core/drivers/picodata-go/logger"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"git.picodata.io/core/drivers/picodata-go/logger"
 )
 
 // Pool allows for connection reuse.
@@ -56,7 +56,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	}
 
 	if poolOpts.logLevel > 0 {
-		logger.SetLevel(poolOpts.logLevel)
+		_ = logger.SetLevel(poolOpts.logLevel)
 	}
 
 	initConn, err := pgxpool.NewWithConfig(ctx, config)
