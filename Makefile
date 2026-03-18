@@ -17,3 +17,9 @@ run-env: stop-env
 
 stop-env:
 	docker compose -f build/docker-compose.yml down -v
+
+image:
+	docker build -f build/Dockerfile.test-runner -t docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1 .
+
+push_image: image
+	docker push docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1
