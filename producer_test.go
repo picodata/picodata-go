@@ -14,7 +14,7 @@ const (
 	defaultURI = "postgresql://admin:T0psecret@localhost:55432?sslmode=disable"
 )
 
-func picodataUri() string {
+func picodataURI() string {
 	val, ok := os.LookupEnv("PICODATA_TEST_CONN")
 
 	if !ok {
@@ -25,9 +25,9 @@ func picodataUri() string {
 }
 
 func TestProducer(t *testing.T) {
-	dbUri := picodataUri()
+	dbURI := picodataURI()
 
-	cfg, err := pgxpool.ParseConfig(dbUri)
+	cfg, err := pgxpool.ParseConfig(dbURI)
 	assert.NoError(t, err)
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
@@ -38,7 +38,7 @@ func TestProducer(t *testing.T) {
 	stopChan := make(chan struct{})
 
 	prov := newConnectionProvider(pool, 1)
-	producer, err := newStateProducer(prov, dbUri)
+	producer, err := newStateProducer(prov, dbURI)
 	assert.NoError(t, err)
 	go producer.runProducing(eventChan, stopChan)
 

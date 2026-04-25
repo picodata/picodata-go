@@ -9,7 +9,8 @@ var _ BalanceStrategy = (*randomStrategy)(nil)
 
 type randomStrategy struct{}
 
-func NewRandomStrategy() randomStrategy {
+// NewRandomStrategy creates a strategy that chooses the next node randomly.
+func NewRandomStrategy() BalanceStrategy {
 	return randomStrategy{}
 }
 

@@ -1,9 +1,9 @@
 package strategies_test
 
 import (
+	"math"
 	"sync"
 	"testing"
-	"math"
 
 	"git.picodata.io/core/drivers/picodata-go/strategies"
 	"github.com/stretchr/testify/assert"
@@ -16,7 +16,7 @@ func TestRoundRobinStrategy(t *testing.T) {
 	})
 
 	t.Run("TestNext", func(t *testing.T) {
-		var current uint64 = 0
+		var current uint64
 		strategy := strategies.NewRoundRobinStrategy()
 		poolSize := uint64(4)
 
@@ -28,7 +28,7 @@ func TestRoundRobinStrategy(t *testing.T) {
 	})
 
 	t.Run("TestNextConcurrent", func(t *testing.T) {
-		var current uint64 = 0
+		var current uint64
 		strategy := strategies.NewRoundRobinStrategy()
 		poolSize := uint64(2)
 		const goroutines = 100

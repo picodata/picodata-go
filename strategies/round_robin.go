@@ -8,7 +8,8 @@ var _ BalanceStrategy = (*roundRobinStrategy)(nil)
 
 type roundRobinStrategy struct{}
 
-func NewRoundRobinStrategy() roundRobinStrategy {
+// NewRoundRobinStrategy creates a strategy that iterates nodes in order.
+func NewRoundRobinStrategy() BalanceStrategy {
 	return roundRobinStrategy{}
 }
 

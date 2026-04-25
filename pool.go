@@ -78,7 +78,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	var manager *topologyManager
 	var producer *stateProducer
 	if !poolOpts.disableTopologyManager {
-		//TODO: research suitable capacity for eventChan
+		// TODO: research suitable capacity for eventChan.
 		eventChan := make(chan event, 10)
 		manager = newTopologyManager(provider)
 

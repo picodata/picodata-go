@@ -13,7 +13,7 @@ import (
 
 type mockBalancerStrategy struct{}
 
-func (ms mockBalancerStrategy) Next(current *uint64, size uint64) uint64 {
+func (ms mockBalancerStrategy) Next(_ *uint64, _ uint64) uint64 {
 	return 1
 }
 

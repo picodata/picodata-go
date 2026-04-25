@@ -17,10 +17,10 @@ import (
 const (
 	// In production, you may use environment variable.
 	// We expose connection url here to keep example simple.
-	CONNECTION_URL = "postgres://admin:T0psecret@localhost:4327"
+	ConnectionURL = "postgres://admin:T0psecret@localhost:4327"
 
 	// Query to create table to store and get data from.
-	QUERY_CREATE_TASKS_TABLE = "create table if not exists tasks (id integer primary key,description text not null)"
+	QueryCreateTasksTable = "create table if not exists tasks (id integer primary key,description text not null)"
 )
 
 // Pool is a global variable to keep example simple.
@@ -30,7 +30,7 @@ func main() {
 	var err error
 
 	// Connect to the Picodata database.
-	pool, err = picogo.New(context.Background(), CONNECTION_URL, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
+	pool, err = picogo.New(context.Background(), ConnectionURL, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
@@ -38,7 +38,7 @@ func main() {
 	defer pool.Close()
 
 	// Create test table "tasks" for storing and reading data.
-	_, err = pool.Exec(context.Background(), QUERY_CREATE_TASKS_TABLE)
+	_, err = pool.Exec(context.Background(), QueryCreateTasksTable)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to create table: %v\n", err)
 		os.Exit(1)
@@ -106,7 +106,6 @@ func main() {
 			continue
 		}
 	}
-
 }
 
 func listTasks() error {

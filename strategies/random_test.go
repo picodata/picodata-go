@@ -15,7 +15,7 @@ func TestRandomStrategy(t *testing.T) {
 	})
 
 	t.Run("TestNext", func(t *testing.T) {
-		var current uint64 = 0
+		var current uint64
 		strategy := strategies.NewRandomStrategy()
 		poolSize := uint64(4)
 
@@ -26,7 +26,7 @@ func TestRandomStrategy(t *testing.T) {
 	})
 
 	t.Run("TestNextConcurrent", func(t *testing.T) {
-		var current uint64 = 0
+		var current uint64
 		strategy := strategies.NewRandomStrategy()
 		poolSize := uint64(5)
 		const goroutines = 100

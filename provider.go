@@ -91,6 +91,7 @@ func (p *connectionProvider) nextConnection() *pgxpool.Pool {
 
 	return p.connections[index]
 }
+
 func (p *connectionProvider) addConn(address string) error {
 	const op = "provider: addConn"
 

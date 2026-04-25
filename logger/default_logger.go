@@ -9,9 +9,20 @@ var _ Logger = (*defaultLogger)(nil)
 
 var globalLogger Logger = newDefaultLogger()
 
-func SetDefaultLogger(logger Logger)                { globalLogger = logger }
-func SetLevel(level LogLevel) error                 { return globalLogger.SetLevel(level) }
-func Log(level LogLevel, msg string, fields ...any) { globalLogger.Log(level, msg, fields...) }
+// SetDefaultLogger overrides the global logger implementation.
+func SetDefaultLogger(logger Logger) {
+	globalLogger = logger
+}
+
+// SetLevel updates the global logger level.
+func SetLevel(level LogLevel) error {
+	return globalLogger.SetLevel(level)
+}
+
+// Log writes a log message using the global logger.
+func Log(level LogLevel, msg string, fields ...any) {
+	globalLogger.Log(level, msg, fields...)
+}
 
 type defaultLogger struct {
 	level LogLevel

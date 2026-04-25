@@ -11,7 +11,7 @@ import (
 )
 
 func TestManager(t *testing.T) {
-	cfg, err := pgxpool.ParseConfig(picodataUri())
+	cfg, err := pgxpool.ParseConfig(picodataURI())
 	assert.NoError(t, err)
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)

@@ -16,6 +16,7 @@ type poolOpts struct {
 	maxConnsPerInstance    int32
 }
 
+// PoolOption applies a single optional configuration to a pool.
 type PoolOption func(*poolOpts) error
 
 // WithBalanceStrategy defines logic of pool balancing across connections
@@ -68,10 +69,10 @@ func WithServiceConnString(addr string) PoolOption {
 	}
 }
 
+// WithMaxConnPerInstance limits the number of connections opened per instance.
 func WithMaxConnPerInstance(maxConns int32) PoolOption {
 	return func(p *poolOpts) error {
 		p.maxConnsPerInstance = maxConns
 		return nil
 	}
-
 }
