@@ -99,6 +99,27 @@ func TestProvider(t *testing.T) {
 		}
 	})
 
+	t.Run("TestRemoveUnknownConnectionNoEffect", func(t *testing.T) {
+		host := "host"
+		ports := []int{0, 1}
+
+		pool1 := newMockPool(host, ports[0])
+		pool2 := newMockPool(host, ports[1])
+		prov := newConnectionProvider(pool1, 1)
+		prov.connections = append(prov.connections, pool2)
+		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[1])] = 1
+
+		unknown := "unknown:9999"
+		require.NotPanics(t, func() {
+			prov.removeConn(unknown)
+		})
+
+		assert.Len(t, prov.conns(), 2)
+		assert.Len(t, prov.connsMap(), 2)
+		assert.Equal(t, pool1, prov.connsMap()[fmt.Sprintf("%s:%d", host, ports[0])])
+		assert.Equal(t, pool2, prov.connsMap()[fmt.Sprintf("%s:%d", host, ports[1])])
+	})
+
 	t.Run("TestNextConnectionConcurrent", func(t *testing.T) {
 		addr := "addr"
 		ports := []int{0, 1, 2}

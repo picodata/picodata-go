@@ -138,9 +138,14 @@ func (p *connectionProvider) removeConn(address string) {
 	const op = "provider: removeConn"
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	// If connection with address doesn't exist -> return
-	index := p.connectionsMap[address]
+	index, ok := p.connectionsMap[address]
+	if !ok {
+		logger.Log(logger.LevelWarn, "%s: connection with address %s doesn't exist", op, address)
+		return
+	}
 
 	// Get address of last connection in pool
 	lastConnAddr := fmt.Sprintf("%s:%d", p.connections[len(p.connections)-1].Config().ConnConfig.Host, p.connections[len(p.connections)-1].Config().ConnConfig.Port)
@@ -157,8 +162,6 @@ func (p *connectionProvider) removeConn(address string) {
 	}
 	// Delete connection from connSlice by truncating it
 	p.connections = p.connections[:len(p.connections)-1]
-
-	p.mu.Unlock()
 
 	logger.Log(logger.LevelDebug, "%s: %s", op, address)
 }
