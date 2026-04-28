@@ -2,6 +2,7 @@ package picodata
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -20,6 +21,41 @@ type Pool struct {
 
 	stopOnce sync.Once
 	stopChan chan struct{}
+}
+
+// ErrNoConnections is returned when no connections are available in the pool.
+var ErrNoConnections = errors.New("no available connections")
+
+// errorRow implements pgx.Row and returns a predefined error on Scan.
+// Used to avoid returning nil from QueryRow when no connections are available.
+type errorRow struct {
+	err error
+}
+
+func (r errorRow) Scan(_ ...any) error {
+	return r.err
+}
+
+// errorBatchResults implements pgx.BatchResults and returns a predefined error
+// on any method call. Used to avoid returning nil from SendBatch.
+type errorBatchResults struct {
+	err error
+}
+
+func (b errorBatchResults) Close() error {
+	return b.err
+}
+
+func (b errorBatchResults) Exec() (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, b.err
+}
+
+func (b errorBatchResults) Query() (pgx.Rows, error) {
+	return nil, b.err
+}
+
+func (b errorBatchResults) QueryRow() pgx.Row {
+	return errorRow(b)
 }
 
 // ParseConfig builds a [*pgxpool.Config] from connString.
@@ -129,6 +165,9 @@ func (p *Pool) Ping(ctx context.Context) error {
 // needed. See the documentation for those types for details.
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	conn := p.provider.nextConnection()
+	if conn == nil {
+		return nil, ErrNoConnections
+	}
 	return conn.Query(ctx, sql, args...)
 }
 
@@ -146,6 +185,9 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 // needed. See the documentation for those types for details.
 func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	conn := p.provider.nextConnection()
+	if conn == nil {
+		return errorRow{err: ErrNoConnections}
+	}
 	return conn.QueryRow(ctx, sql, args...)
 }
 
@@ -174,6 +216,9 @@ func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 //	if err != nil{...}
 func (p *Pool) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
 	conn := p.provider.nextConnection()
+	if conn == nil {
+		return errorBatchResults{err: ErrNoConnections}
+	}
 	return conn.SendBatch(ctx, b)
 }
 
@@ -183,6 +228,9 @@ func (p *Pool) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
 // The acquired connection is returned to the pool when the Exec function returns.
 func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	conn := p.provider.nextConnection()
+	if conn == nil {
+		return pgconn.CommandTag{}, ErrNoConnections
+	}
 	return conn.Exec(ctx, sql, args...)
 }
 
