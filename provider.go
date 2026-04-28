@@ -81,6 +81,7 @@ func (p *connectionProvider) nextConnection() *pgxpool.Pool {
 	p.mu.RLock()
 
 	if len(p.connections) == 0 {
+		p.mu.RUnlock()
 		logger.Log(logger.LevelWarn, "%s: connections slice is empty", op)
 		return nil
 	}

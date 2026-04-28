@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -66,6 +67,36 @@ func TestProvider(t *testing.T) {
 		assert.Equal(t, pool1, prov.nextConnection())
 		assert.Equal(t, pool2, prov.nextConnection())
 		assert.Equal(t, pool1, prov.nextConnection())
+	})
+
+	t.Run("TestNextConnectionEmptyNoDeadlock", func(t *testing.T) {
+		pool := newMockPool("127.0.0.1", 5432)
+		prov := newConnectionProvider(pool, 1)
+		prov.removeConn("127.0.0.1:5432")
+
+		nextDone := make(chan struct{})
+		go func() {
+			_ = prov.nextConnection()
+			close(nextDone)
+		}()
+
+		select {
+		case <-nextDone:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("nextConnection blocked when connections slice is empty")
+		}
+
+		lockDone := make(chan struct{})
+		go func() {
+			prov.setBalanceStrategy(mockBalancerStrategy{})
+			close(lockDone)
+		}()
+
+		select {
+		case <-lockDone:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("lock not released after nextConnection on empty pool")
+		}
 	})
 
 	t.Run("TestNextConnectionConcurrent", func(t *testing.T) {
