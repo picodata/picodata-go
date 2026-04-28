@@ -2,6 +2,7 @@ package picodata
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -24,6 +25,24 @@ const (
 type connState struct {
 	address      string
 	currentState string
+}
+
+func parseConnStatusFromJSON(connFetchedState []byte) (string, error) {
+	var values []json.RawMessage
+	if err := json.Unmarshal(connFetchedState, &values); err != nil {
+		return "", fmt.Errorf("state payload must be a json array: %w", err)
+	}
+	if len(values) == 0 {
+		return "", fmt.Errorf("state array is empty")
+	}
+
+	var connStateStr string
+	// 0 index is a state string: ["Online",1]
+	if err := json.Unmarshal(values[0], &connStateStr); err != nil {
+		return "", fmt.Errorf("state must be a string: %w", err)
+	}
+
+	return connStateStr, nil
 }
 
 type stateProducer struct {
@@ -108,15 +127,15 @@ func (p *stateProducer) getConnStates() ([]connState, error) {
 
 	for rows.Next() {
 		var connAddr string
-		var connFetchedState []any // contains [string, int]
+		var connFetchedState []byte // ["Online",1]
 
 		if err := rows.Scan(&connAddr, &connFetchedState); err != nil {
 			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 
-		connStateStr, ok := connFetchedState[0].(string)
-		if !ok {
-			return nil, fmt.Errorf("%s: %s state must be a string, but has type %T", op, connAddr, connFetchedState[0])
+		connStateStr, err := parseConnStatusFromJSON(connFetchedState)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", op, connAddr, err)
 		}
 
 		connsState = append(connsState, connState{address: connAddr, currentState: connStateStr})

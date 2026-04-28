@@ -61,15 +61,15 @@ func getTopology(ctx context.Context, conn *pgxpool.Pool) ([]connState, error) {
 
 	for rows.Next() {
 		var connAddr string
-		var connFetchedState []any // contains [string, int]
+		var connFetchedState []byte // ["Online",1]
 
 		if err := rows.Scan(&connAddr, &connFetchedState); err != nil {
 			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 
-		connStateStr, ok := connFetchedState[0].(string)
-		if !ok {
-			return nil, fmt.Errorf("%s: %s state must be a string, but has type %T", op, connAddr, connFetchedState[0])
+		connStateStr, err := parseConnStatusFromJSON(connFetchedState)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", op, connAddr, err)
 		}
 
 		instances = append(instances, connState{address: connAddr, currentState: connStateStr})
