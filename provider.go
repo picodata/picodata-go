@@ -56,10 +56,6 @@ func (p *connectionProvider) config() *pgxpool.Config {
 	return p.connectionsConfig.Copy()
 }
 
-func (p *connectionProvider) conns() []*pgxpool.Pool {
-	return p.connections
-}
-
 func (p *connectionProvider) connsMap() map[string]*pgxpool.Pool {
 	p.mu.RLock()
 	connectionsMap := make(map[string]*pgxpool.Pool, len(p.connectionsMap))
@@ -164,4 +160,47 @@ func (p *connectionProvider) removeConn(address string) {
 	p.connections = p.connections[:len(p.connections)-1]
 
 	logger.Log(logger.LevelDebug, "%s: %s", op, address)
+}
+
+func (p *connectionProvider) ping(ctx context.Context) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, pool := range p.connections {
+		if err := pingPool(ctx, pool); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *connectionProvider) close() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, pool := range p.connections {
+		pool.Close()
+	}
+}
+
+func (p *connectionProvider) reset() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, pool := range p.connections {
+		pool.Reset()
+	}
+}
+
+func pingPool(ctx context.Context, p *pgxpool.Pool) error {
+	const op = "provider: pingPool"
+
+	c, err := p.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Release()
+
+	if _, err = c.Exec(ctx, "SELECT 1"); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+
+	return nil
 }

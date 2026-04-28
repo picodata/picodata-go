@@ -144,13 +144,7 @@ func (p *Pool) Ping(ctx context.Context) error {
 	// The original *pgxpool.Ping() method sends an empty query, **--ping**, which is a comment.
 	// We need to use a custom function to send a simple **SELECT 1** query instead.
 	// Replace to original Ping method when comment support is implemented.
-	for _, pool := range p.provider.conns() {
-		if err := pingPool(ctx, pool); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return p.provider.ping(ctx)
 }
 
 // Query acquires a connection and executes a query that returns pgx.Rows.
@@ -241,9 +235,7 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 func (p *Pool) Close() {
 	p.stopOnce.Do(func() {
 		close(p.stopChan)
-		for _, pool := range p.provider.conns() {
-			pool.Close()
-		}
+		p.provider.close()
 	})
 }
 
@@ -253,23 +245,5 @@ func (p *Pool) Close() {
 // It is safe to reset a pool while connections are checked out. Those connections will be closed when they are returned
 // to the pool.
 func (p *Pool) Reset() {
-	for _, c := range p.provider.conns() {
-		c.Reset()
-	}
-}
-
-func pingPool(ctx context.Context, p *pgxpool.Pool) error {
-	const op = "pool: pingPool"
-
-	c, err := p.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer c.Release()
-
-	if _, err = c.Exec(ctx, "SELECT 1"); err != nil {
-		return fmt.Errorf("%s: %w", op, err)
-	}
-
-	return nil
+	p.provider.reset()
 }

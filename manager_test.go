@@ -39,5 +39,7 @@ func TestManager(t *testing.T) {
 	}()
 	wg.Wait()
 
-	assert.Len(t, prov.conns(), 2)
+	prov.mu.RLock()
+	assert.Len(t, prov.connections, 2)
+	prov.mu.RUnlock()
 }
