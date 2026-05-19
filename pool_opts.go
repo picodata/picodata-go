@@ -5,19 +5,32 @@ import (
 
 	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/strategies"
+	"git.picodata.io/core/drivers/picodata-go/topology"
 )
 
 type poolOpts struct {
-	logLevel               logger.LogLevel
-	logger                 logger.Logger
-	balanceStrategy        strategies.BalanceStrategy
-	serviceConnAddress     string
-	disableTopologyManager bool
-	maxConnsPerInstance    int32
+	logLevel              logger.LogLevel
+	logger                logger.Logger
+	topologySource        topology.Source
+	balanceStrategy       strategies.BalanceStrategy
+	bootstrapHosts        []string
+	disableTopologyUpdate bool
+	maxConnsPerInstance   int32
 }
 
 // PoolOption applies a single optional configuration to a pool.
 type PoolOption func(*poolOpts) error
+
+// WithTopologySource sets a custom topology source
+func WithTopologySource(source topology.Source) PoolOption {
+	return func(p *poolOpts) error {
+		if source == nil {
+			return fmt.Errorf("topology source is nil")
+		}
+		p.topologySource = source
+		return nil
+	}
+}
 
 // WithBalanceStrategy defines logic of pool balancing across connections
 func WithBalanceStrategy(strategy strategies.BalanceStrategy) PoolOption {
@@ -49,22 +62,30 @@ func WithLogLevel(level logger.LogLevel) PoolOption {
 	}
 }
 
-// WithDisableTopologyManaging disables backfround poller that actualizes topology
-func WithDisableTopologyManaging() PoolOption {
+// WithDisableTopologyUpdate disables backfround poller that actualizes topology
+func WithDisableTopologyUpdate() PoolOption {
 	return func(p *poolOpts) error {
-		p.disableTopologyManager = true
+		p.disableTopologyUpdate = true
 		return nil
 	}
 }
 
-// WithServiceConnString takes postgresql connection string
-// for the service instance where cluster metainfo will be taken
-func WithServiceConnString(addr string) PoolOption {
+// WithBootstrapHosts appends alternative nodes for the initial discovery phase.
+func WithBootstrapHosts(hosts ...string) PoolOption {
 	return func(p *poolOpts) error {
-		if len(addr) == 0 {
-			return fmt.Errorf("service connection address is empty")
+		// If the user passes an empty slice or nil, we do nothing.
+		// This prevents overwriting or corrupting already discovered hosts.
+		if len(hosts) == 0 {
+			return nil
 		}
-		p.serviceConnAddress = addr
+
+		// Filter out empty strings to avoid invalid network addresses later.
+		for _, host := range hosts {
+			if host != "" {
+				p.bootstrapHosts = append(p.bootstrapHosts, host)
+			}
+		}
+
 		return nil
 	}
 }

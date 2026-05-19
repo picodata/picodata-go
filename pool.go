@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
+	"time"
 
 	"git.picodata.io/core/drivers/picodata-go/logger"
+	"git.picodata.io/core/drivers/picodata-go/topology"
+	"git.picodata.io/core/drivers/picodata-go/topology/source/dynamic"
+	"git.picodata.io/core/drivers/picodata-go/topology/source/polling"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,11 +21,9 @@ import (
 // It operates with slice of *pgxpool.Pool, each Picodata instance have its own pool object.
 type Pool struct {
 	provider *connectionProvider
-	manager  *topologyManager
-	producer *stateProducer
+	manager  *topology.Manager
 
 	stopOnce sync.Once
-	stopChan chan struct{}
 }
 
 // ErrNoConnections is returned when no connections are available in the pool.
@@ -95,38 +98,41 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		_ = logger.SetLevel(poolOpts.logLevel)
 	}
 
+	// Extract the primary host from DSN if it exists
+	if config.ConnConfig.Host != "" {
+		primaryAddr := net.JoinHostPort(config.ConnConfig.Host, fmt.Sprintf("%d", config.ConnConfig.Port))
+		poolOpts.bootstrapHosts = append(poolOpts.bootstrapHosts, primaryAddr)
+	}
+
 	initConn, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	stopChan := make(chan struct{})
 	var connPool *Pool
 	provider := newConnectionProvider(initConn, poolOpts.maxConnsPerInstance)
 	if poolOpts.balanceStrategy != nil {
 		provider.setBalanceStrategy(poolOpts.balanceStrategy)
 	}
 
-	if err := initialDiscovery(ctx, provider); err != nil {
+	var topologySource topology.Source
+	switch {
+	case poolOpts.topologySource != nil:
+		topologySource = poolOpts.topologySource
+	case !poolOpts.disableTopologyUpdate:
+		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, 5000*time.Millisecond)
+	default:
+		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts)
+	}
+
+	topologyManager, err := topology.NewTopologyManager(ctx, topologySource)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	var manager *topologyManager
-	var producer *stateProducer
-	if !poolOpts.disableTopologyManager {
-		// TODO: research suitable capacity for eventChan.
-		eventChan := make(chan event, 10)
-		manager = newTopologyManager(provider)
+	topologyManager.AddListener(provider)
 
-		producer, err = newStateProducer(provider, poolOpts.serviceConnAddress)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", op, err)
-		}
-		go manager.runProcessing(eventChan)
-		go producer.runProducing(eventChan, stopChan)
-	}
-
-	connPool = &Pool{provider: provider, manager: manager, producer: producer, stopChan: stopChan}
+	connPool = &Pool{provider: provider, manager: topologyManager}
 
 	return connPool, nil
 }
@@ -234,7 +240,7 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 // It is safe to close a pool multiple times.
 func (p *Pool) Close() {
 	p.stopOnce.Do(func() {
-		close(p.stopChan)
+		p.manager.Close()
 		p.provider.close()
 	})
 }

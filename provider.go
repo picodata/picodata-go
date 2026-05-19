@@ -9,6 +9,7 @@ import (
 
 	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/strategies"
+	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -29,7 +30,7 @@ func newConnectionProvider(initConn *pgxpool.Pool, connPerInstance int32) *conne
 	connPool := make([]*pgxpool.Pool, 0, 1)
 	connMap := make(map[string]int, 1)
 
-	connPool = append(connPool, initConn)
+	connPool = append(connPool, initConn) //
 	addr := fmt.Sprintf("%s:%d", initConn.Config().ConnConfig.Host, initConn.Config().ConnConfig.Port)
 	connMap[addr] = 0
 
@@ -203,4 +204,26 @@ func pingPool(ctx context.Context, p *pgxpool.Pool) error {
 	}
 
 	return nil
+}
+
+func (p *connectionProvider) OnTopologyChanged(topology *tpm.ClusterTopology) {
+	added := 0
+
+	for _, nodeInfo := range topology.Nodes {
+		switch nodeInfo.State {
+		case tpm.StateOnline:
+			if _, ok := p.connectionsMap[nodeInfo.Address]; !ok {
+				if err := p.addConn(nodeInfo.Address); err != nil {
+					logger.Log(logger.LevelError, "provider: failed to add connection for %s: %v", nodeInfo.Address, err)
+					continue
+				}
+				added++
+			}
+		case tpm.StateOffline:
+			p.removeConn(nodeInfo.Address)
+		default:
+		}
+	}
+
+	logger.Log(logger.LevelDebug, "provider: discovered %d instances, added %d connections", len(topology.Nodes), added)
 }
