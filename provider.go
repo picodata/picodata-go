@@ -49,8 +49,9 @@ func (p *connectionProvider) setBalanceStrategy(s strategies.BalanceStrategy) {
 	// -race flag will complain about using provider in different goroutines
 	// so the mutex is essential here.
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.balanceStrategy = s
-	p.mu.Unlock()
 }
 
 func (p *connectionProvider) config() *pgxpool.Config {
@@ -59,20 +60,16 @@ func (p *connectionProvider) config() *pgxpool.Config {
 
 func (p *connectionProvider) connsMap() map[string]*pgxpool.Pool {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
 	connectionsMap := make(map[string]*pgxpool.Pool, len(p.connectionsMap))
 	for address, index := range p.connectionsMap {
 		connectionsMap[address] = p.connections[index]
 	}
-	p.mu.RUnlock()
 
 	return connectionsMap
 }
 
 func (p *connectionProvider) nextConnection() *pgxpool.Pool {
-	// NOTE: Ran benchmark with defered and sequential mutex
-	// ---------------------------------------
-	// NextConn        358411162   3.205 ns/op
-	// NextConnDefer   318601726   3.783 ns/op
 	p.mu.RLock()
 
 	if len(p.connections) == 0 {
@@ -83,16 +80,16 @@ func (p *connectionProvider) nextConnection() *pgxpool.Pool {
 
 	index := p.balanceStrategy.Next(&p.current, uint64(len(p.connections)))
 
+	// Deref not used because it descrise perfomance ~15%
+	// ---------------------------------------
+	// Current solution   358411162   3.205 ns/op
+	// Defer solution     318601726   3.783 ns/op
 	p.mu.RUnlock()
 
 	return p.connections[index]
 }
 
 func (p *connectionProvider) addConn(address string) error {
-	// NOTE: Ran benchmark with defered and sequential mutex
-	// ---------------------------------------
-	// AddConn        1000000   2610 ns/op
-	// AddConnDefer   1000000   2057 ns/op
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
