@@ -69,8 +69,6 @@ func (p *connectionProvider) connsMap() map[string]*pgxpool.Pool {
 }
 
 func (p *connectionProvider) nextConnection() *pgxpool.Pool {
-	const op = "provider: nextConnection"
-
 	// NOTE: Ran benchmark with defered and sequential mutex
 	// ---------------------------------------
 	// NextConn        358411162   3.205 ns/op
@@ -79,7 +77,7 @@ func (p *connectionProvider) nextConnection() *pgxpool.Pool {
 
 	if len(p.connections) == 0 {
 		p.mu.RUnlock()
-		logger.Log(logger.LevelWarn, "%s: connections slice is empty", op)
+		logger.Log(logger.LevelWarn, "[provider] connection not found in a pool")
 		return nil
 	}
 
@@ -91,8 +89,6 @@ func (p *connectionProvider) nextConnection() *pgxpool.Pool {
 }
 
 func (p *connectionProvider) addConn(address string) error {
-	const op = "provider: addConn"
-
 	// NOTE: Ran benchmark with defered and sequential mutex
 	// ---------------------------------------
 	// AddConn        1000000   2610 ns/op
@@ -111,7 +107,7 @@ func (p *connectionProvider) addConn(address string) error {
 	// Convert port from string to integer
 	port, err := strconv.Atoi(hostAndPort[1])
 	if err != nil {
-		return fmt.Errorf("%s: cant convert port %s to int: %w", op, hostAndPort[1], err)
+		return fmt.Errorf("parse port error [port: %s]: %w", hostAndPort[1], err)
 	}
 
 	// Picodata provides valid port, so casting is safe
@@ -126,21 +122,19 @@ func (p *connectionProvider) addConn(address string) error {
 	p.connections = append(p.connections, conn)
 	p.connectionsMap[address] = len(p.connections) - 1
 
-	logger.Log(logger.LevelDebug, "%s: %s", op, address)
+	logger.Log(logger.LevelDebug, "[provider] a connection to address %s was appended", address)
 
 	return nil
 }
 
 func (p *connectionProvider) removeConn(address string) {
-	const op = "provider: removeConn"
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	// If connection with address doesn't exist -> return
 	index, ok := p.connectionsMap[address]
 	if !ok {
-		logger.Log(logger.LevelWarn, "%s: connection with address %s doesn't exist", op, address)
+		logger.Log(logger.LevelWarn, "[provider] a connection for address %s not found", address)
 		return
 	}
 
@@ -160,7 +154,7 @@ func (p *connectionProvider) removeConn(address string) {
 	// Delete connection from connSlice by truncating it
 	p.connections = p.connections[:len(p.connections)-1]
 
-	logger.Log(logger.LevelDebug, "%s: %s", op, address)
+	logger.Log(logger.LevelDebug, "[provider] a connection to address %s was removed", address)
 }
 
 func (p *connectionProvider) ping(ctx context.Context) error {
@@ -191,8 +185,6 @@ func (p *connectionProvider) reset() {
 }
 
 func pingPool(ctx context.Context, p *pgxpool.Pool) error {
-	const op = "provider: pingPool"
-
 	c, err := p.Acquire(ctx)
 	if err != nil {
 		return err
@@ -200,7 +192,7 @@ func pingPool(ctx context.Context, p *pgxpool.Pool) error {
 	defer c.Release()
 
 	if _, err = c.Exec(ctx, "SELECT 1"); err != nil {
-		return fmt.Errorf("%s: %w", op, err)
+		return fmt.Errorf("ping pool error: %w", err)
 	}
 
 	return nil
@@ -214,7 +206,7 @@ func (p *connectionProvider) OnTopologyChanged(topology *tpm.ClusterTopology) {
 		case tpm.StateOnline:
 			if _, ok := p.connectionsMap[nodeInfo.Address]; !ok {
 				if err := p.addConn(nodeInfo.Address); err != nil {
-					logger.Log(logger.LevelError, "provider: failed to add connection for %s: %v", nodeInfo.Address, err)
+					logger.Log(logger.LevelError, "[provider] failed to add connection [address: %s]: %v", nodeInfo.Address, err)
 					continue
 				}
 				added++
@@ -225,5 +217,5 @@ func (p *connectionProvider) OnTopologyChanged(topology *tpm.ClusterTopology) {
 		}
 	}
 
-	logger.Log(logger.LevelDebug, "provider: discovered %d instances, added %d connections", len(topology.Nodes), added)
+	logger.Log(logger.LevelDebug, "[provider] discovered %d instances, added %d connections", len(topology.Nodes), added)
 }

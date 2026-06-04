@@ -47,14 +47,14 @@ func (p *Source) Subscribe(ctx context.Context) (<-chan *topology.ClusterTopolog
 			case <-ticker.C:
 				topology, err := p.dynamic.Fetch(ctx)
 				if err != nil {
-					logger.Log(logger.LevelWarn, "polling source: background fetch error: %v", err)
+					logger.Log(logger.LevelWarn, "[topology] polling source: background fetch error: %v", err)
 					continue
 				}
 
 				select {
 				case ch <- topology:
 				default:
-					logger.Log(logger.LevelWarn, "polling source: buffer full")
+					logger.Log(logger.LevelWarn, "[topology] polling source: buffer full")
 				}
 			}
 		}

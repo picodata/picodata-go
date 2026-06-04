@@ -115,7 +115,7 @@ func (p *Source) queryInfo(ctx context.Context, addr string) (map[string]topolog
 
 	defer func() {
 		if err := conn.Close(ctx); err != nil {
-			logger.Log(logger.LevelWarn, "dynamic source: failed to close connection properly: %v", err)
+			logger.Log(logger.LevelWarn, "[topology] dynamic source: failed to close connection properly: %v", err)
 		}
 	}()
 

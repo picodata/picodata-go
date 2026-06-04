@@ -81,12 +81,10 @@ func New(ctx context.Context, connString string, opts ...PoolOption) (*Pool, err
 
 // NewWithConfig creates a new [Pool]. config must have been created by [ParseConfig].
 func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOption) (*Pool, error) {
-	const op = "pool: NewWithConfig"
-
 	poolOpts := &poolOpts{}
 	for i, opt := range opts {
 		if err := opt(poolOpts); err != nil {
-			return nil, fmt.Errorf("%s: applying option %d: %w", op, i+1, err)
+			return nil, fmt.Errorf("apply config error [param=%d]: %w", i+1, err)
 		}
 	}
 
@@ -106,7 +104,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 
 	initConn, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
+		return nil, fmt.Errorf("pgxpoll init error: %w", err)
 	}
 
 	var connPool *Pool
@@ -127,7 +125,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 
 	topologyManager, err := topology.NewTopologyManager(ctx, topologySource)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
+		return nil, fmt.Errorf("topology manager init error: %w", err)
 	}
 
 	topologyManager.AddListener(provider)

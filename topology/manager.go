@@ -64,7 +64,7 @@ func (tpm *Manager) updateLoop(sp StreamingSource) {
 
 	ch, err := sp.Subscribe(tpm.ctx)
 	if err != nil {
-		logger.Log(logger.LevelWarn, "topology manager: failed to subscribe: %v", err)
+		logger.Log(logger.LevelWarn, "[topology] failed to subscribe: %v", err)
 		return
 	}
 
@@ -74,7 +74,7 @@ func (tpm *Manager) updateLoop(sp StreamingSource) {
 			return
 		case topology, ok := <-ch:
 			if !ok {
-				logger.Log(logger.LevelWarn, "topology manager: update channel closed unexpectedly")
+				logger.Log(logger.LevelWarn, "[topology] update channel closed unexpectedly")
 				return
 			}
 
