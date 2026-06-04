@@ -17,6 +17,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// TopologyPollTimeoute setup topology update time
+const TopologyPollTimeoute = 5000 * time.Millisecond
+
 // Pool allows for connection reuse.
 // It operates with slice of *pgxpool.Pool, each Picodata instance have its own pool object.
 type Pool struct {
@@ -118,7 +121,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	case poolOpts.topologySource != nil:
 		topologySource = poolOpts.topologySource
 	case !poolOpts.disableTopologyUpdate:
-		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, 5000*time.Millisecond)
+		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, TopologyPollTimeoute)
 	default:
 		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts)
 	}
