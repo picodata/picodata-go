@@ -58,15 +58,13 @@ func (p *connectionProvider) config() *pgxpool.Config {
 	return p.connectionsConfig.Copy()
 }
 
-func (p *connectionProvider) connsMap() map[string]*pgxpool.Pool {
+func (p *connectionProvider) PoolSize() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	connectionsMap := make(map[string]*pgxpool.Pool, len(p.connectionsMap))
-	for address, index := range p.connectionsMap {
-		connectionsMap[address] = p.connections[index]
-	}
 
-	return connectionsMap
+	l := len(p.connectionsMap)
+
+	return l
 }
 
 func (p *connectionProvider) nextConnection() *pgxpool.Pool {

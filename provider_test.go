@@ -39,8 +39,7 @@ func TestProvider(t *testing.T) {
 		prov.mu.RLock()
 		assert.Len(t, prov.connections, 1)
 		prov.mu.RUnlock()
-		assert.NotNil(t, prov.connsMap())
-		assert.Len(t, prov.connsMap(), 1)
+		assert.Equal(t, prov.PoolSize(), 1)
 	})
 
 	t.Run("TestSetBalanceStrategy", func(t *testing.T) {
@@ -117,9 +116,7 @@ func TestProvider(t *testing.T) {
 		})
 
 		assert.Len(t, prov.connections, 2)
-		assert.Len(t, prov.connsMap(), 2)
-		assert.Equal(t, pool1, prov.connsMap()[fmt.Sprintf("%s:%d", host, ports[0])])
-		assert.Equal(t, pool2, prov.connsMap()[fmt.Sprintf("%s:%d", host, ports[1])])
+		assert.Equal(t, prov.PoolSize(), 2)
 	})
 
 	t.Run("TestNextConnectionConcurrent", func(t *testing.T) {
@@ -193,9 +190,7 @@ func TestProvider(t *testing.T) {
 		assert.Len(t, prov.connections, 1)
 		assert.Equal(t, fmt.Sprintf("%s:%d", prov.connections[0].Config().ConnConfig.Host, prov.connections[0].Config().ConnConfig.Port), host3)
 		prov.mu.RUnlock()
-		assert.Len(t, prov.connsMap(), 1)
-		_, ok := prov.connsMap()[host3]
-		assert.True(t, ok)
+		assert.Equal(t, prov.PoolSize(), 1)
 	})
 
 	t.Run("TestRemoveConnection", func(t *testing.T) {
@@ -207,7 +202,7 @@ func TestProvider(t *testing.T) {
 		prov.mu.RLock()
 		assert.Len(t, prov.connections, 0)
 		prov.mu.RUnlock()
-		assert.Len(t, prov.connsMap(), 0)
+		assert.Equal(t, prov.PoolSize(), 0)
 	})
 
 	t.Run("TestRemoveConnectionLastPosition", func(t *testing.T) {
@@ -228,7 +223,7 @@ func TestProvider(t *testing.T) {
 		prov.mu.RLock()
 		assert.Len(t, prov.connections, 2)
 		prov.mu.RUnlock()
-		assert.Len(t, prov.connsMap(), 2)
+		assert.Equal(t, prov.PoolSize(), 2)
 
 		for addr, index := range prov.connectionsMap {
 			assert.Equal(t, addr, fmt.Sprintf("%s:%d", host, ports[index]))
@@ -253,7 +248,7 @@ func TestProvider(t *testing.T) {
 		prov.mu.RLock()
 		assert.Len(t, prov.connections, 2)
 		prov.mu.RUnlock()
-		assert.Len(t, prov.connsMap(), 2)
+		assert.Equal(t, prov.PoolSize(), 2)
 		assert.Equal(t, prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[0])], 0)
 		assert.Equal(t, prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])], 1)
 	})
