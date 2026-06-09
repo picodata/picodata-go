@@ -2,15 +2,14 @@ package picodata
 
 import (
 	"fmt"
+	"log/slog"
 
-	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/strategies"
 	"git.picodata.io/core/drivers/picodata-go/topology"
 )
 
 type poolOpts struct {
-	logLevel              logger.LogLevel
-	logger                logger.Logger
+	logger                *slog.Logger
 	topologySource        topology.Source
 	balanceStrategy       strategies.BalanceStrategy
 	bootstrapHosts        []string
@@ -44,20 +43,12 @@ func WithBalanceStrategy(strategy strategies.BalanceStrategy) PoolOption {
 }
 
 // WithLogger sets a custom pool internal logger to print information
-func WithLogger(customLogger logger.Logger) PoolOption {
+func WithLogger(customLogger *slog.Logger) PoolOption {
 	return func(p *poolOpts) error {
 		if customLogger == nil {
 			return fmt.Errorf("logger is nil")
 		}
 		p.logger = customLogger
-		return nil
-	}
-}
-
-// WithLogLevel set a logger level for pool internal logger
-func WithLogLevel(level logger.LogLevel) PoolOption {
-	return func(p *poolOpts) error {
-		p.logLevel = level
 		return nil
 	}
 }

@@ -3,11 +3,11 @@ package picodata
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 
-	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/strategies"
 	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 
@@ -15,6 +15,7 @@ import (
 )
 
 type connectionProvider struct {
+	logger            *slog.Logger
 	mu                sync.RWMutex
 	current           uint64
 	connectionsConfig *pgxpool.Config
@@ -26,15 +27,25 @@ type connectionProvider struct {
 	connectionPerInstance int32
 }
 
-func newConnectionProvider(initConn *pgxpool.Pool, connPerInstance int32) *connectionProvider {
+type providerOption func(*connectionProvider)
+
+// withProviderLogger takes the root logger and bakes the package-specific tag inside.
+func withProviderLogger(l *slog.Logger) providerOption {
+	return func(c *connectionProvider) {
+		c.logger = l.With(slog.String("component", "provider"))
+	}
+}
+
+func newConnectionProvider(initConn *pgxpool.Pool, connPerInstance int32, opts ...providerOption) *connectionProvider {
 	connPool := make([]*pgxpool.Pool, 0, 1)
 	connMap := make(map[string]int, 1)
 
-	connPool = append(connPool, initConn) //
+	connPool = append(connPool, initConn)
 	addr := fmt.Sprintf("%s:%d", initConn.Config().ConnConfig.Host, initConn.Config().ConnConfig.Port)
 	connMap[addr] = 0
 
-	return &connectionProvider{
+	cp := &connectionProvider{
+		logger:                slog.New(slog.DiscardHandler),
 		current:               0,
 		connectionsConfig:     initConn.Config().Copy(),
 		connections:           connPool,
@@ -42,6 +53,12 @@ func newConnectionProvider(initConn *pgxpool.Pool, connPerInstance int32) *conne
 		balanceStrategy:       strategies.NewRoundRobinStrategy(),
 		connectionPerInstance: connPerInstance,
 	}
+
+	for _, opt := range opts {
+		opt(cp)
+	}
+
+	return cp
 }
 
 func (p *connectionProvider) setBalanceStrategy(s strategies.BalanceStrategy) {
@@ -72,7 +89,7 @@ func (p *connectionProvider) nextConnection() *pgxpool.Pool {
 
 	if len(p.connections) == 0 {
 		p.mu.RUnlock()
-		logger.Log(logger.LevelWarn, "[provider] connection not found in a pool")
+		p.logger.Warn("connection not found in a pool")
 		return nil
 	}
 
@@ -117,7 +134,7 @@ func (p *connectionProvider) addConn(address string) error {
 	p.connections = append(p.connections, conn)
 	p.connectionsMap[address] = len(p.connections) - 1
 
-	logger.Log(logger.LevelDebug, "[provider] a connection to address %s was appended", address)
+	p.logger.Debug("a connection to address was appended", slog.Any("address", address))
 
 	return nil
 }
@@ -129,7 +146,7 @@ func (p *connectionProvider) removeConn(address string) {
 	// If connection with address doesn't exist -> return
 	index, ok := p.connectionsMap[address]
 	if !ok {
-		logger.Log(logger.LevelWarn, "[provider] a connection for address %s not found", address)
+		p.logger.Warn("a connection for address not found", slog.Any("address", address))
 		return
 	}
 
@@ -149,7 +166,7 @@ func (p *connectionProvider) removeConn(address string) {
 	// Delete connection from connSlice by truncating it
 	p.connections = p.connections[:len(p.connections)-1]
 
-	logger.Log(logger.LevelDebug, "[provider] a connection to address %s was removed", address)
+	p.logger.Debug("a connection to address was removed", slog.Any("address", address))
 }
 
 func (p *connectionProvider) ping(ctx context.Context) error {
@@ -201,7 +218,7 @@ func (p *connectionProvider) OnTopologyChanged(topology *tpm.ClusterTopology) {
 		case tpm.StateOnline:
 			if _, ok := p.connectionsMap[nodeInfo.Address]; !ok {
 				if err := p.addConn(nodeInfo.Address); err != nil {
-					logger.Log(logger.LevelError, "[provider] failed to add connection [address: %s]: %v", nodeInfo.Address, err)
+					p.logger.Error("failed to add connection", slog.Any("addres", nodeInfo.Address), slog.Any("error", err))
 					continue
 				}
 				added++
@@ -212,5 +229,5 @@ func (p *connectionProvider) OnTopologyChanged(topology *tpm.ClusterTopology) {
 		}
 	}
 
-	logger.Log(logger.LevelDebug, "[provider] discovered %d instances, added %d connections", len(topology.Nodes), added)
+	p.logger.Debug(fmt.Sprintf("discovered %d instances, added %d connections", len(topology.Nodes), added))
 }

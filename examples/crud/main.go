@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"os"
 	"strconv"
 	"strings"
 
 	picogo "git.picodata.io/core/drivers/picodata-go"
-	"git.picodata.io/core/drivers/picodata-go/logger"
 	strats "git.picodata.io/core/drivers/picodata-go/strategies"
 )
 
@@ -29,8 +29,13 @@ var pool *picogo.Pool
 func main() {
 	var err error
 
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
+
 	// Connect to the Picodata database.
-	pool, err = picogo.New(context.Background(), ConnectionURL, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogLevel(logger.LevelError))
+	pool, err = picogo.New(context.Background(), ConnectionURL, picogo.WithBalanceStrategy(strats.NewRoundRobinStrategy()), picogo.WithLogger(logger))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)

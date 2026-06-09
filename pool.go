@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
-	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/topology"
 	"git.picodata.io/core/drivers/picodata-go/topology/source/dynamic"
 	"git.picodata.io/core/drivers/picodata-go/topology/source/polling"
@@ -91,12 +91,9 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		}
 	}
 
-	if poolOpts.logger != nil {
-		logger.SetDefaultLogger(poolOpts.logger)
-	}
-
-	if poolOpts.logLevel > 0 {
-		_ = logger.SetLevel(poolOpts.logLevel)
+	logger := poolOpts.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
 
 	// Extract the primary host from DSN if it exists
@@ -111,7 +108,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	}
 
 	var connPool *Pool
-	provider := newConnectionProvider(initConn, poolOpts.maxConnsPerInstance)
+	provider := newConnectionProvider(initConn, poolOpts.maxConnsPerInstance, withProviderLogger(logger))
 	if poolOpts.balanceStrategy != nil {
 		provider.setBalanceStrategy(poolOpts.balanceStrategy)
 	}
@@ -121,12 +118,12 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	case poolOpts.topologySource != nil:
 		topologySource = poolOpts.topologySource
 	case !poolOpts.disableTopologyUpdate:
-		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, TopologyPollTimeoute)
+		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, TopologyPollTimeoute, polling.WithLogger(logger))
 	default:
-		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts)
+		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts, dynamic.WithLogger(logger))
 	}
 
-	topologyManager, err := topology.NewTopologyManager(ctx, topologySource)
+	topologyManager, err := topology.NewTopologyManager(ctx, topologySource, topology.WithLogger(logger))
 	if err != nil {
 		return nil, fmt.Errorf("topology manager init error: %w", err)
 	}

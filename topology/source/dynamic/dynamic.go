@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync/atomic"
 	"time"
 
-	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/topology"
 	"github.com/jackc/pgx/v5"
 )
@@ -19,21 +19,37 @@ const defaultQueryTimeout = 3 * time.Second
 
 // Source discovers and fetches cluster topology by querying nodes dynamically.
 type Source struct {
+	logger         *slog.Logger
 	baseConfig     *pgx.ConnConfig
 	bootstrapAddrs []string
 	// discoveredAddrs caches the addresses of online nodes found during the last successful fetch.
 	discoveredAddrs atomic.Pointer[[]string]
 }
 
+// Option applies a configuration option to the Dynamic Source.
+type Option func(*Source)
+
+// WithLogger takes the root logger and wraps it with the dynamic package tag.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Source) {
+		s.logger = l.With(slog.String("component", "topology.source.dynamic"))
+	}
+}
+
 // New creates a new DynamicSource with a base connection configuration and initial bootstrap addresses.
-func New(baseConfig *pgx.ConnConfig, bootstrapAddrs []string) *Source {
-	p := &Source{
+func New(baseConfig *pgx.ConnConfig, bootstrapAddrs []string, opts ...Option) *Source {
+	s := &Source{
+		logger:         slog.New(slog.DiscardHandler),
 		baseConfig:     baseConfig.Copy(),
 		bootstrapAddrs: bootstrapAddrs,
 	}
 
-	p.discoveredAddrs.Store(&[]string{})
-	return p
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	s.discoveredAddrs.Store(&[]string{})
+	return s
 }
 
 // Fetch queries the cluster nodes sequentially until it successfully retrieves the current topology.
@@ -115,7 +131,7 @@ func (p *Source) queryInfo(ctx context.Context, addr string) (map[string]topolog
 
 	defer func() {
 		if err := conn.Close(ctx); err != nil {
-			logger.Log(logger.LevelWarn, "[topology] dynamic source: failed to close connection properly: %v", err)
+			p.logger.Warn("failed to close connection properly", slog.Any("error", err))
 		}
 	}()
 

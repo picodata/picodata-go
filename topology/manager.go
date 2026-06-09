@@ -3,15 +3,15 @@ package topology
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"sync"
 	"sync/atomic"
-
-	"git.picodata.io/core/drivers/picodata-go/logger"
 )
 
 // Manager coordinates topology updates and dispatches them to listeners.
 type Manager struct {
+	logger *slog.Logger
 	// mu serializes state updates during applyAndNotify and protects the listeners slice.
 	mu        sync.Mutex
 	listeners []Listener
@@ -24,8 +24,18 @@ type Manager struct {
 	done chan struct{}
 }
 
+// Option applies a configuration option to the Manager.
+type Option func(*Manager)
+
+// WithLogger takes the root logger and wraps it with the topology manager package tag.
+func WithLogger(l *slog.Logger) Option {
+	return func(m *Manager) {
+		m.logger = l.With(slog.String("component", "topology.manager"))
+	}
+}
+
 // NewTopologyManager creates and initializes a TopologyManager instance.
-func NewTopologyManager(parent context.Context, source Source) (*Manager, error) {
+func NewTopologyManager(parent context.Context, source Source, opts ...Option) (*Manager, error) {
 	// Fallback to background context if parent is nil to prevent initialization panic.
 	if parent == nil {
 		parent = context.Background()
@@ -34,17 +44,22 @@ func NewTopologyManager(parent context.Context, source Source) (*Manager, error)
 	ctx, cancel := context.WithCancel(parent)
 
 	tpm := &Manager{
+		logger: slog.New(slog.DiscardHandler),
 		ctx:    ctx,
 		cancel: cancel,
 		source: source,
 		done:   make(chan struct{}),
 	}
 
+	for _, opt := range opts {
+		opt(tpm)
+	}
+
 	topology, err := source.Fetch(ctx)
 	if err != nil {
 		cancel()
 
-		return nil, fmt.Errorf("topology manager: fetch: %w", err)
+		return nil, fmt.Errorf("fetch: %w", err)
 	}
 
 	tpm.current.Store(topology)
@@ -64,7 +79,7 @@ func (tpm *Manager) updateLoop(sp StreamingSource) {
 
 	ch, err := sp.Subscribe(tpm.ctx)
 	if err != nil {
-		logger.Log(logger.LevelWarn, "[topology] failed to subscribe: %v", err)
+		tpm.logger.Warn("failed to subscribe", slog.Any("error", err))
 		return
 	}
 
@@ -74,7 +89,7 @@ func (tpm *Manager) updateLoop(sp StreamingSource) {
 			return
 		case topology, ok := <-ch:
 			if !ok {
-				logger.Log(logger.LevelWarn, "[topology] update channel closed unexpectedly")
+				tpm.logger.Warn("update channel closed unexpectedly")
 				return
 			}
 

@@ -2,9 +2,9 @@ package polling
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
-	"git.picodata.io/core/drivers/picodata-go/logger"
 	"git.picodata.io/core/drivers/picodata-go/topology"
 	"git.picodata.io/core/drivers/picodata-go/topology/source/dynamic"
 	"github.com/jackc/pgx/v5"
@@ -12,16 +12,34 @@ import (
 
 // Source wraps DynamicSource to provide periodic topology delta updates.
 type Source struct {
+	logger   *slog.Logger
 	dynamic  *dynamic.Source
 	interval time.Duration
 }
 
+// Option applies a configuration option to the Polling Source.
+type Option func(*Source)
+
+// WithLogger takes the root logger and wraps it with the polling package tag.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Source) {
+		s.logger = l.With(slog.String("pkg", "topology.polling"))
+	}
+}
+
 // New creates a new PollingSource initializing the underlying dynamic explorer.
-func New(baseConfig *pgx.ConnConfig, bootstrapAddrs []string, interval time.Duration) *Source {
-	return &Source{
-		dynamic:  dynamic.New(baseConfig, bootstrapAddrs),
+func New(baseConfig *pgx.ConnConfig, bootstrapAddrs []string, interval time.Duration, opts ...Option) *Source {
+	s := &Source{
+		logger:   slog.New(slog.DiscardHandler),
 		interval: interval,
 	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	s.dynamic = dynamic.New(baseConfig, bootstrapAddrs, dynamic.WithLogger(s.logger))
+	return s
 }
 
 // Fetch pulls the full current topology from the cluster.
@@ -47,14 +65,14 @@ func (p *Source) Subscribe(ctx context.Context) (<-chan *topology.ClusterTopolog
 			case <-ticker.C:
 				topology, err := p.dynamic.Fetch(ctx)
 				if err != nil {
-					logger.Log(logger.LevelWarn, "[topology] polling source: background fetch error: %v", err)
+					p.logger.Warn("background fetch error", slog.Any("error", err))
 					continue
 				}
 
 				select {
 				case ch <- topology:
 				default:
-					logger.Log(logger.LevelWarn, "[topology] polling source: buffer full")
+					p.logger.Warn("buffer full")
 				}
 			}
 		}
