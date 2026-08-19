@@ -8,112 +8,105 @@ import (
 	"strings"
 	"sync"
 
-	"git.picodata.io/core/drivers/picodata-go/strategies"
 	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type connectionProvider struct {
-	logger            *slog.Logger
-	mu                sync.RWMutex
-	current           uint64
-	connectionsConfig *pgxpool.Config
-	connections       []*pgxpool.Pool
+type poolManager struct {
+	logger *slog.Logger
+	mu     sync.RWMutex
+	config *pgxpool.Config
+	pools  []*pgxpool.Pool
 	// Key: instance address
-	// Value: index of corresponding *pgxpool.Pool in [connectionProvider] connections slice
-	connectionsMap        map[string]int
-	balanceStrategy       strategies.BalanceStrategy
+	// Value: index of corresponding *pgxpool.Pool in [poolManager] pools slice
+	poolsMap              map[string]int
 	connectionPerInstance int32
 }
 
-type providerOption func(*connectionProvider)
+type poolManagerOption func(*poolManager)
 
-// withProviderLogger takes the root logger and bakes the package-specific tag inside.
-func withProviderLogger(l *slog.Logger) providerOption {
-	return func(c *connectionProvider) {
-		c.logger = l.With(slog.String("component", "provider"))
+// withPoolManagerLogger takes the root logger and bakes the package-specific tag inside.
+func withPoolManagerLogger(l *slog.Logger) poolManagerOption {
+	return func(pm *poolManager) {
+		pm.logger = l.With(slog.String("component", "pool_manager"))
 	}
 }
 
-func newConnectionProvider(initConn *pgxpool.Pool, connPerInstance int32, opts ...providerOption) *connectionProvider {
-	connPool := make([]*pgxpool.Pool, 0, 1)
-	connMap := make(map[string]int, 1)
+func newPoolManager(initPool *pgxpool.Pool, connPerInstance int32, opts ...poolManagerOption) *poolManager {
+	pools := make([]*pgxpool.Pool, 0, 1)
+	poolsIndex := make(map[string]int, 1)
 
-	connPool = append(connPool, initConn)
-	addr := fmt.Sprintf("%s:%d", initConn.Config().ConnConfig.Host, initConn.Config().ConnConfig.Port)
-	connMap[addr] = 0
+	pools = append(pools, initPool)
+	poolsIndex[poolAddr(initPool)] = 0
 
-	cp := &connectionProvider{
+	pm := &poolManager{
 		logger:                slog.New(slog.DiscardHandler),
-		current:               0,
-		connectionsConfig:     initConn.Config().Copy(),
-		connections:           connPool,
-		connectionsMap:        connMap,
-		balanceStrategy:       strategies.NewRoundRobinStrategy(),
+		config:                initPool.Config().Copy(),
+		pools:                 pools,
+		poolsMap:              poolsIndex,
 		connectionPerInstance: connPerInstance,
 	}
 
 	for _, opt := range opts {
-		opt(cp)
+		opt(pm)
 	}
 
-	return cp
+	return pm
 }
 
-func (p *connectionProvider) setBalanceStrategy(s strategies.BalanceStrategy) {
-	// NOTE: we use this function only in init stage, but
-	// -race flag will complain about using provider in different goroutines
-	// so the mutex is essential here.
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (pm *poolManager) PoolSize() int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 
-	p.balanceStrategy = s
+	return len(pm.poolsMap)
 }
 
-func (p *connectionProvider) config() *pgxpool.Config {
-	return p.connectionsConfig.Copy()
+func (pm *poolManager) getConfig() *pgxpool.Config {
+	return pm.config.Copy()
 }
 
-func (p *connectionProvider) PoolSize() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+// pick selects a pool under a single lock: indexFn receives the current pool
+// count and returns the index to use, so the count it saw and the slice it
+// indexes into can never be torn apart by a concurrent addPool/removePool.
+//
+// indexFn runs while pm.mu is held for reading, so it must not call back into
+// the poolManager: sync.RWMutex is not reentrant, and a writer waiting on
+// addPool/removePool would deadlock a nested RLock.
+func (pm *poolManager) pick(indexFn func(size int) uint64) *pgxpool.Pool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 
-	l := len(p.connectionsMap)
-
-	return l
-}
-
-func (p *connectionProvider) nextConnection() *pgxpool.Pool {
-	p.mu.RLock()
-
-	if len(p.connections) == 0 {
-		p.mu.RUnlock()
-		p.logger.Warn("connection not found in a pool")
+	size := len(pm.pools)
+	if size == 0 {
 		return nil
 	}
 
-	index := p.balanceStrategy.Next(&p.current, uint64(len(p.connections)))
+	index := indexFn(size)
+	index %= uint64(size)
 
-	// Deref not used because it descrise perfomance ~15%
-	// ---------------------------------------
-	// Current solution   358411162   3.205 ns/op
-	// Defer solution     318601726   3.783 ns/op
-	p.mu.RUnlock()
-
-	return p.connections[index]
+	return pm.pools[index]
 }
 
-func (p *connectionProvider) addConn(address string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (pm *poolManager) addPool(address string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if _, ok := pm.poolsMap[address]; ok {
+		pm.logger.Warn("already exists")
+		return nil
+	}
+
+	hostAndPort := strings.Split(address, ":")
+	if len(hostAndPort) != 2 {
+		return fmt.Errorf("invalid address format: %q", address)
+	}
 
 	// Create a new config for connection
-	connCfg := p.connectionsConfig.Copy()
-	hostAndPort := strings.Split(address, ":")
+	connCfg := pm.config.Copy()
 	connCfg.ConnConfig.Host = hostAndPort[0]
-	if p.connectionPerInstance != 0 {
-		connCfg.MaxConns = int32(p.connectionPerInstance)
+	if pm.connectionPerInstance != 0 {
+		connCfg.MaxConns = int32(pm.connectionPerInstance)
 	}
 
 	// Convert port from string to integer
@@ -125,73 +118,77 @@ func (p *connectionProvider) addConn(address string) error {
 	// Picodata provides valid port, so casting is safe
 	connCfg.ConnConfig.Port = uint16(port)
 
-	conn, err := pgxpool.NewWithConfig(context.Background(), connCfg)
+	pool, err := pgxpool.NewWithConfig(context.Background(), connCfg)
 	if err != nil {
 		return err
 	}
 
-	// Add connection to the connection pool
-	p.connections = append(p.connections, conn)
-	p.connectionsMap[address] = len(p.connections) - 1
+	// Add pool to the pools slice
+	pm.pools = append(pm.pools, pool)
+	pm.poolsMap[address] = len(pm.pools) - 1
 
-	p.logger.Debug("a connection to address was appended", slog.Any("address", address))
+	pm.logger.Debug("a pool for address was appended", slog.Any("address", address))
 
 	return nil
 }
 
-func (p *connectionProvider) removeConn(address string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (pm *poolManager) removePool(address string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 
-	// If connection with address doesn't exist -> return
-	index, ok := p.connectionsMap[address]
+	// If pool for address doesn't exist -> return
+	index, ok := pm.poolsMap[address]
 	if !ok {
-		p.logger.Warn("a connection for address not found", slog.Any("address", address))
+		pm.logger.Warn("a pool for address not found", slog.Any("address", address))
 		return
 	}
 
-	// Get address of last connection in pool
-	lastConnAddr := fmt.Sprintf("%s:%d", p.connections[len(p.connections)-1].Config().ConnConfig.Host, p.connections[len(p.connections)-1].Config().ConnConfig.Port)
+	// Get address of last pool
+	lastPoolAddr := poolAddr(pm.pools[len(pm.pools)-1])
 
-	// Remove entry about connection from connMap
-	delete(p.connectionsMap, address)
+	// Remove entry about pool from poolsIndex
+	delete(pm.poolsMap, address)
 
-	// If deleted connection isn't last in pool
-	if index != len(p.connections)-1 {
-		// Move last connection to the position of deleted one
-		p.connections[index] = p.connections[len(p.connections)-1]
-		// Update index of last connection in connMap
-		p.connectionsMap[lastConnAddr] = index
+	// If deleted pool isn't last in the slice
+	if index != len(pm.pools)-1 {
+		// Move last pool to the position of deleted one
+		pm.pools[index] = pm.pools[len(pm.pools)-1]
+		// Update index of last pool in poolsIndex
+		pm.poolsMap[lastPoolAddr] = index
 	}
-	// Delete connection from connSlice by truncating it
-	p.connections = p.connections[:len(p.connections)-1]
+	// Delete pool from pools slice by truncating it
+	pm.pools = pm.pools[:len(pm.pools)-1]
 
-	p.logger.Debug("a connection to address was removed", slog.Any("address", address))
+	pm.logger.Debug("a pool for address was removed", slog.Any("address", address))
 }
 
-func (p *connectionProvider) ping(ctx context.Context) error {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, pool := range p.connections {
-		if err := pingPool(ctx, pool); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+func (pm *poolManager) close() {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 
-func (p *connectionProvider) close() {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, pool := range p.connections {
+	for _, pool := range pm.pools {
 		pool.Close()
 	}
 }
 
-func (p *connectionProvider) reset() {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, pool := range p.connections {
+func (pm *poolManager) ping(ctx context.Context) error {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	for _, pool := range pm.pools {
+		if err := pingPool(ctx, pool); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (pm *poolManager) reset() {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	for _, pool := range pm.pools {
 		pool.Reset()
 	}
 }
@@ -210,24 +207,23 @@ func pingPool(ctx context.Context, p *pgxpool.Pool) error {
 	return nil
 }
 
-func (p *connectionProvider) OnTopologyChanged(topology *tpm.ClusterTopology) {
-	added := 0
+func poolAddr(p *pgxpool.Pool) string {
+	return fmt.Sprintf("%s:%d", p.Config().ConnConfig.Host, p.Config().ConnConfig.Port)
+}
 
+func (pm *poolManager) OnTopologyChanged(topology *tpm.ClusterTopology) {
 	for _, nodeInfo := range topology.Nodes {
 		switch nodeInfo.State {
 		case tpm.StateOnline:
-			if _, ok := p.connectionsMap[nodeInfo.Address]; !ok {
-				if err := p.addConn(nodeInfo.Address); err != nil {
-					p.logger.Error("failed to add connection", slog.Any("addres", nodeInfo.Address), slog.Any("error", err))
-					continue
-				}
-				added++
+			if err := pm.addPool(nodeInfo.Address); err != nil {
+				pm.logger.Error("failed to add connection", slog.Any("addres", nodeInfo.Address), slog.Any("error", err))
+				continue
 			}
 		case tpm.StateOffline:
-			p.removeConn(nodeInfo.Address)
+			pm.removePool(nodeInfo.Address)
 		default:
 		}
 	}
 
-	p.logger.Debug(fmt.Sprintf("discovered %d instances, added %d connections", len(topology.Nodes), added))
+	pm.logger.Debug(fmt.Sprintf("discovered %d instances", len(topology.Nodes)))
 }

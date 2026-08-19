@@ -9,12 +9,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newEmptyPool(t *testing.T) *Pool {
+func newEmptyPool(t *testing.T) *Client {
 	t.Helper()
 	pool := newMockPool("127.0.0.1", 5432)
-	prov := newConnectionProvider(pool, 1)
-	prov.removeConn("127.0.0.1:5432")
-	return &Pool{provider: prov}
+	pm := newPoolManager(pool, 1)
+	pm.removePool("127.0.0.1:5432")
+	return &Client{pools: pm, router: newRouter(pm)}
 }
 
 func TestPoolNoConnections(t *testing.T) {

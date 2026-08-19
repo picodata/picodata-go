@@ -8,7 +8,7 @@ import (
 	"git.picodata.io/core/drivers/picodata-go/topology"
 )
 
-type poolOpts struct {
+type clientOpts struct {
 	logger                *slog.Logger
 	topologySource        topology.Source
 	balanceStrategy       strategies.BalanceStrategy
@@ -18,11 +18,11 @@ type poolOpts struct {
 }
 
 // PoolOption applies a single optional configuration to a pool.
-type PoolOption func(*poolOpts) error
+type PoolOption func(*clientOpts) error
 
 // WithTopologySource sets a custom topology source
 func WithTopologySource(source topology.Source) PoolOption {
-	return func(p *poolOpts) error {
+	return func(p *clientOpts) error {
 		if source == nil {
 			return fmt.Errorf("topology source is nil")
 		}
@@ -33,7 +33,7 @@ func WithTopologySource(source topology.Source) PoolOption {
 
 // WithBalanceStrategy defines logic of pool balancing across connections
 func WithBalanceStrategy(strategy strategies.BalanceStrategy) PoolOption {
-	return func(p *poolOpts) error {
+	return func(p *clientOpts) error {
 		if strategy == nil {
 			return fmt.Errorf("balance strategy is nil")
 		}
@@ -44,7 +44,7 @@ func WithBalanceStrategy(strategy strategies.BalanceStrategy) PoolOption {
 
 // WithLogger sets a custom pool internal logger to print information
 func WithLogger(customLogger *slog.Logger) PoolOption {
-	return func(p *poolOpts) error {
+	return func(p *clientOpts) error {
 		if customLogger == nil {
 			return fmt.Errorf("logger is nil")
 		}
@@ -55,7 +55,7 @@ func WithLogger(customLogger *slog.Logger) PoolOption {
 
 // WithDisableTopologyUpdate disables backfround poller that actualizes topology
 func WithDisableTopologyUpdate() PoolOption {
-	return func(p *poolOpts) error {
+	return func(p *clientOpts) error {
 		p.disableTopologyUpdate = true
 		return nil
 	}
@@ -63,7 +63,7 @@ func WithDisableTopologyUpdate() PoolOption {
 
 // WithBootstrapHosts appends alternative nodes for the initial discovery phase.
 func WithBootstrapHosts(hosts ...string) PoolOption {
-	return func(p *poolOpts) error {
+	return func(p *clientOpts) error {
 		// If the user passes an empty slice or nil, we do nothing.
 		// This prevents overwriting or corrupting already discovered hosts.
 		if len(hosts) == 0 {
@@ -83,7 +83,7 @@ func WithBootstrapHosts(hosts ...string) PoolOption {
 
 // WithMaxConnPerInstance limits the number of connections opened per instance.
 func WithMaxConnPerInstance(maxConns int32) PoolOption {
-	return func(p *poolOpts) error {
+	return func(p *clientOpts) error {
 		p.maxConnsPerInstance = maxConns
 		return nil
 	}

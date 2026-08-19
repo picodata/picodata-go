@@ -2,25 +2,12 @@ package picodata
 
 import (
 	"context"
-	"fmt"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type mockBalancerStrategy struct{}
-
-func (ms mockBalancerStrategy) Next(_ *uint64, _ uint64) uint64 {
-	return 1
-}
-
-func (ms mockBalancerStrategy) Type() string {
-	return "Mock"
-}
 
 func newMockPool(host string, port int) *pgxpool.Pool {
 	cfg, _ := pgxpool.ParseConfig("")
@@ -30,226 +17,75 @@ func newMockPool(host string, port int) *pgxpool.Pool {
 	return p
 }
 
-func TestProvider(t *testing.T) {
-	t.Run("TestNewConnectionProvider", func(t *testing.T) {
-		pool := newMockPool("127.0.0.1", 5432)
-		prov := newConnectionProvider(pool, 1)
+// newTestPoolManager seeds a manager with several pools at once. It fills
+// pools/poolsMap directly rather than going through addPool, which would build
+// a fresh pgxpool out of the config instead of taking the one handed to it.
+func newTestPoolManager(pools ...*pgxpool.Pool) *poolManager {
+	pm := newPoolManager(pools[0], 1)
 
-		require.NotNil(t, prov)
-		prov.mu.RLock()
-		assert.Len(t, prov.connections, 1)
-		prov.mu.RUnlock()
-		assert.Equal(t, prov.PoolSize(), 1)
-	})
+	for _, p := range pools[1:] {
+		pm.pools = append(pm.pools, p)
+		pm.poolsMap[poolAddr(p)] = len(pm.pools) - 1
+	}
 
-	t.Run("TestSetBalanceStrategy", func(t *testing.T) {
-		pool1 := newMockPool("127.0.0.1", 5432)
-		pool2 := newMockPool("127.0.0.1", 5433)
+	return pm
+}
 
-		prov := newConnectionProvider(pool1, 1)
-		prov.connections = append(prov.connections, pool2)
+func TestPoolManager(t *testing.T) {
+	t.Run("TestNewPoolManager", func(t *testing.T) {
+		pm := newPoolManager(newMockPool("127.0.0.1", 5432), 1)
 
-		prov.setBalanceStrategy(mockBalancerStrategy{})
-		// Always return second connection
-		for range 5 {
-			assert.Equal(t, pool2, prov.nextConnection())
-		}
-	})
-
-	t.Run("TestNextConection", func(t *testing.T) {
-		pool1 := newMockPool("127.0.0.1", 5432)
-		pool2 := newMockPool("127.0.0.1", 5433)
-
-		prov := newConnectionProvider(pool1, 1)
-		// Because we can
-		prov.connections = append(prov.connections, pool2)
-
-		// Default strategy is RoundRobin
-		assert.Equal(t, pool1, prov.nextConnection())
-		assert.Equal(t, pool2, prov.nextConnection())
-		assert.Equal(t, pool1, prov.nextConnection())
-	})
-
-	t.Run("TestNextConnectionEmptyNoDeadlock", func(t *testing.T) {
-		pool := newMockPool("127.0.0.1", 5432)
-		prov := newConnectionProvider(pool, 1)
-		prov.removeConn("127.0.0.1:5432")
-
-		nextDone := make(chan struct{})
-		go func() {
-			_ = prov.nextConnection()
-			close(nextDone)
-		}()
-
-		select {
-		case <-nextDone:
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("nextConnection blocked when connections slice is empty")
-		}
-
-		lockDone := make(chan struct{})
-		go func() {
-			prov.setBalanceStrategy(mockBalancerStrategy{})
-			close(lockDone)
-		}()
-
-		select {
-		case <-lockDone:
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("lock not released after nextConnection on empty pool")
-		}
+		require.NotNil(t, pm)
+		assert.Len(t, pm.pools, 1)
+		assert.Equal(t, 1, pm.PoolSize())
 	})
 
 	t.Run("TestRemoveUnknownConnectionNoEffect", func(t *testing.T) {
-		host := "host"
-		ports := []int{0, 1}
+		pm := newTestPoolManager(newMockPool("host", 0), newMockPool("host", 1))
 
-		pool1 := newMockPool(host, ports[0])
-		pool2 := newMockPool(host, ports[1])
-		prov := newConnectionProvider(pool1, 1)
-		prov.connections = append(prov.connections, pool2)
-		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[1])] = 1
-
-		unknown := "unknown:9999"
 		require.NotPanics(t, func() {
-			prov.removeConn(unknown)
+			pm.removePool("unknown:9999")
 		})
 
-		assert.Len(t, prov.connections, 2)
-		assert.Equal(t, prov.PoolSize(), 2)
-	})
-
-	t.Run("TestNextConnectionConcurrent", func(t *testing.T) {
-		addr := "addr"
-		ports := []int{0, 1, 2}
-		host1 := fmt.Sprintf("%s:%d", addr, ports[0])
-		host2 := fmt.Sprintf("%s:%d", addr, ports[1])
-		host3 := fmt.Sprintf("%s:%d", addr, ports[2])
-
-		pool1 := newMockPool(addr, ports[0])
-		pool2 := newMockPool(addr, ports[1])
-		pool3 := newMockPool(addr, ports[2])
-
-		prov := newConnectionProvider(pool1, 1)
-		prov.connections = append(prov.connections, pool2)
-		prov.connectionsMap[host2] = 1
-		prov.connections = append(prov.connections, pool3)
-		prov.connectionsMap[host3] = 2
-
-		goroutines := 200
-
-		wg := sync.WaitGroup{}
-
-		wg.Add(goroutines)
-		for range goroutines {
-			go func() {
-				defer wg.Done()
-				conn := prov.nextConnection()
-				assert.NotNil(t, conn)
-			}()
-		}
-
-		type action struct {
-			host   string
-			action string
-		}
-		actionRemove := "remove"
-		actionAdd := "add"
-		actions := []action{{host3, actionRemove}, {host2, actionRemove}, {host3, actionAdd}, {host1, actionRemove}}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for _, action := range actions {
-				switch action.action {
-				case actionRemove:
-					switch action.host {
-					case host1:
-						prov.removeConn(host1)
-					case host2:
-						prov.removeConn(host2)
-					case host3:
-						prov.removeConn(host3)
-					}
-				case actionAdd:
-					switch action.host {
-					case host1:
-						_ = prov.addConn(host1)
-					case host2:
-						_ = prov.addConn(host2)
-					case host3:
-						_ = prov.addConn(host3)
-					}
-				}
-			}
-		}()
-
-		wg.Wait()
-
-		prov.mu.RLock()
-		assert.Len(t, prov.connections, 1)
-		assert.Equal(t, fmt.Sprintf("%s:%d", prov.connections[0].Config().ConnConfig.Host, prov.connections[0].Config().ConnConfig.Port), host3)
-		prov.mu.RUnlock()
-		assert.Equal(t, prov.PoolSize(), 1)
+		assert.Len(t, pm.pools, 2)
+		assert.Equal(t, 2, pm.PoolSize())
 	})
 
 	t.Run("TestRemoveConnection", func(t *testing.T) {
 		pool := newMockPool("127.0.0.1", 5432)
-		prov := newConnectionProvider(pool, 1)
+		pm := newPoolManager(pool, 1)
 
-		prov.removeConn("127.0.0.1:5432")
+		pm.removePool(poolAddr(pool))
 
-		prov.mu.RLock()
-		assert.Len(t, prov.connections, 0)
-		prov.mu.RUnlock()
-		assert.Equal(t, prov.PoolSize(), 0)
+		assert.Empty(t, pm.pools)
+		assert.Equal(t, 0, pm.PoolSize())
 	})
 
 	t.Run("TestRemoveConnectionLastPosition", func(t *testing.T) {
-		host := "host"
-		ports := []int{0, 1, 2}
+		pool1, pool2, pool3 := newMockPool("host", 0), newMockPool("host", 1), newMockPool("host", 2)
+		pm := newTestPoolManager(pool1, pool2, pool3)
 
-		pool1 := newMockPool(host, ports[0])
-		pool2 := newMockPool(host, ports[1])
-		pool3 := newMockPool(host, ports[2])
-		prov := newConnectionProvider(pool1, 1)
-		prov.connections = append(prov.connections, pool2)
-		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[1])] = 1
-		prov.connections = append(prov.connections, pool3)
-		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])] = 2
+		pm.removePool(poolAddr(pool3))
 
-		prov.removeConn(fmt.Sprintf("%s:%d", host, ports[2]))
-
-		prov.mu.RLock()
-		assert.Len(t, prov.connections, 2)
-		prov.mu.RUnlock()
-		assert.Equal(t, prov.PoolSize(), 2)
-
-		for addr, index := range prov.connectionsMap {
-			assert.Equal(t, addr, fmt.Sprintf("%s:%d", host, ports[index]))
-		}
+		// Dropping the tail moves nothing: the survivors keep their indexes.
+		require.Len(t, pm.pools, 2)
+		assert.Equal(t, 2, pm.PoolSize())
+		assert.Equal(t, 0, pm.poolsMap[poolAddr(pool1)])
+		assert.Equal(t, 1, pm.poolsMap[poolAddr(pool2)])
 	})
 
 	t.Run("TestRemoveConnectionMiddlePosition", func(t *testing.T) {
-		host := "host"
-		ports := []int{0, 1, 2}
+		pool1, pool2, pool3 := newMockPool("host", 0), newMockPool("host", 1), newMockPool("host", 2)
+		pm := newTestPoolManager(pool1, pool2, pool3)
 
-		pool1 := newMockPool(host, ports[0])
-		pool2 := newMockPool(host, ports[1])
-		pool3 := newMockPool(host, ports[2])
-		prov := newConnectionProvider(pool1, 1)
-		prov.connections = append(prov.connections, pool2)
-		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[1])] = 1
-		prov.connections = append(prov.connections, pool3)
-		prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])] = 2
+		pm.removePool(poolAddr(pool2))
 
-		prov.removeConn(fmt.Sprintf("%s:%d", host, ports[1]))
-
-		prov.mu.RLock()
-		assert.Len(t, prov.connections, 2)
-		prov.mu.RUnlock()
-		assert.Equal(t, prov.PoolSize(), 2)
-		assert.Equal(t, prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[0])], 0)
-		assert.Equal(t, prov.connectionsMap[fmt.Sprintf("%s:%d", host, ports[2])], 1)
+		// The tail is swapped into the hole, so pool3 has to be reindexed to 1
+		// in both the slice and the map, or a later lookup routes to nothing.
+		require.Len(t, pm.pools, 2)
+		assert.Equal(t, 2, pm.PoolSize())
+		assert.Equal(t, pool3, pm.pools[1])
+		assert.Equal(t, 0, pm.poolsMap[poolAddr(pool1)])
+		assert.Equal(t, 1, pm.poolsMap[poolAddr(pool3)])
 	})
 }

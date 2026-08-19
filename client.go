@@ -20,11 +20,12 @@ import (
 // TopologyPollTimeoute setup topology update time
 const TopologyPollTimeoute = 5000 * time.Millisecond
 
-// Pool allows for connection reuse.
-// It operates with slice of *pgxpool.Pool, each Picodata instance have its own pool object.
-type Pool struct {
-	provider *connectionProvider
-	manager  *topology.Manager
+// Client allows for connection reuse.
+// It operates with slice of *pgxpool.Client, each Picodata instance have its own pool object.
+type Client struct {
+	pools   *poolManager
+	router  *router
+	manager *topology.Manager
 
 	stopOnce sync.Once
 }
@@ -72,8 +73,8 @@ func ParseConfig(connString string) (*pgxpool.Config, error) {
 	return pgxpool.ParseConfig(connString)
 }
 
-// New creates a new [Pool]. See [ParseConfig] for information on connString format.
-func New(ctx context.Context, connString string, opts ...PoolOption) (*Pool, error) {
+// New creates a new [Client]. See [ParseConfig] for information on connString format.
+func New(ctx context.Context, connString string, opts ...PoolOption) (*Client, error) {
 	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		return nil, err
@@ -82,9 +83,9 @@ func New(ctx context.Context, connString string, opts ...PoolOption) (*Pool, err
 	return NewWithConfig(ctx, cfg, opts...)
 }
 
-// NewWithConfig creates a new [Pool]. config must have been created by [ParseConfig].
-func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOption) (*Pool, error) {
-	poolOpts := &poolOpts{}
+// NewWithConfig creates a new [Client]. config must have been created by [ParseConfig].
+func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOption) (*Client, error) {
+	poolOpts := &clientOpts{}
 	for i, opt := range opts {
 		if err := opt(poolOpts); err != nil {
 			return nil, fmt.Errorf("apply config error [param=%d]: %w", i+1, err)
@@ -107,11 +108,14 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		return nil, fmt.Errorf("pgxpoll init error: %w", err)
 	}
 
-	var connPool *Pool
-	provider := newConnectionProvider(initConn, poolOpts.maxConnsPerInstance, withProviderLogger(logger))
+	var connPool *Client
+	pools := newPoolManager(initConn, poolOpts.maxConnsPerInstance, withPoolManagerLogger(logger))
+
+	routerOpts := []routerOption{withRouterLogger(logger)}
 	if poolOpts.balanceStrategy != nil {
-		provider.setBalanceStrategy(poolOpts.balanceStrategy)
+		routerOpts = append(routerOpts, withBalanceStrategy(poolOpts.balanceStrategy))
 	}
+	router := newRouter(pools, routerOpts...)
 
 	var topologySource topology.Source
 	switch {
@@ -128,27 +132,29 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		return nil, fmt.Errorf("topology manager init error: %w", err)
 	}
 
-	topologyManager.AddListener(provider)
+	topologyManager.AddListener(pools)
 
-	connPool = &Pool{provider: provider, manager: topologyManager}
+	connPool = &Client{pools: pools, router: router, manager: topologyManager}
 
 	return connPool, nil
 }
 
 // Config returns a copy of config that was used to initialize this pool.
-func (p *Pool) Config() *pgxpool.Config {
-	return p.provider.config()
+func (p *Client) Config() *pgxpool.Config {
+	return p.pools.getConfig()
 }
 
 // Ping acquires a connection from the Pool and executes a simple SQL statement against it.
 // If the sql returns without error, the database Ping is considered successful, otherwise, the error is returned.
-func (p *Pool) Ping(ctx context.Context) error {
+//
+// Deprecated: usefulness of a cluster-wide ping is unclear; may be removed or reworked.
+func (p *Client) Ping(ctx context.Context) error {
 	// TODO: https://git.picodata.io/core/picodata/-/issues/1324
 	// The Picodata SQL layer (sbroad) doesn't support comments parsing.
 	// The original *pgxpool.Ping() method sends an empty query, **--ping**, which is a comment.
 	// We need to use a custom function to send a simple **SELECT 1** query instead.
 	// Replace to original Ping method when comment support is implemented.
-	return p.provider.ping(ctx)
+	return p.pools.ping(ctx)
 }
 
 // Query acquires a connection and executes a query that returns pgx.Rows.
@@ -161,8 +167,8 @@ func (p *Pool) Ping(ctx context.Context) error {
 // For extra control over how the query is executed, the types QuerySimpleProtocol, QueryResultFormats, and
 // QueryResultFormatsByOID may be used as the first args to control exactly how the query is executed. This is rarely
 // needed. See the documentation for those types for details.
-func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	conn := p.provider.nextConnection()
+func (p *Client) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	conn := p.router.nextConnection()
 	if conn == nil {
 		return nil, ErrNoConnections
 	}
@@ -181,8 +187,8 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 // For extra control over how the query is executed, the types QuerySimpleProtocol, QueryResultFormats, and
 // QueryResultFormatsByOID may be used as the first args to control exactly how the query is executed. This is rarely
 // needed. See the documentation for those types for details.
-func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	conn := p.provider.nextConnection()
+func (p *Client) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	conn := p.router.nextConnection()
 	if conn == nil {
 		return errorRow{err: ErrNoConnections}
 	}
@@ -212,8 +218,8 @@ func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 //	if err != nil{...}
 //	err := results.QueryRow().Scan(&count)
 //	if err != nil{...}
-func (p *Pool) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
-	conn := p.provider.nextConnection()
+func (p *Client) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
+	conn := p.router.nextConnection()
 	if conn == nil {
 		return errorBatchResults{err: ErrNoConnections}
 	}
@@ -224,8 +230,8 @@ func (p *Pool) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
 // SQL can be either a prepared statement name or an SQL string.
 // Arguments should be referenced positionally from the SQL string as $1, $2, etc.
 // The acquired connection is returned to the pool when the Exec function returns.
-func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	conn := p.provider.nextConnection()
+func (p *Client) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	conn := p.router.nextConnection()
 	if conn == nil {
 		return pgconn.CommandTag{}, ErrNoConnections
 	}
@@ -236,10 +242,10 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 // to pool and closed.
 //
 // It is safe to close a pool multiple times.
-func (p *Pool) Close() {
+func (p *Client) Close() {
 	p.stopOnce.Do(func() {
 		p.manager.Close()
-		p.provider.close()
+		p.pools.close()
 	})
 }
 
@@ -248,6 +254,8 @@ func (p *Pool) Close() {
 //
 // It is safe to reset a pool while connections are checked out. Those connections will be closed when they are returned
 // to the pool.
-func (p *Pool) Reset() {
-	p.provider.reset()
+//
+// Deprecated: usefulness of a cluster-wide reset is unclear; may be removed or reworked.
+func (p *Client) Reset() {
+	p.pools.reset()
 }

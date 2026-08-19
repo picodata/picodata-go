@@ -24,7 +24,7 @@ const (
 )
 
 // Pool is a global variable to keep example simple.
-var pool *picogo.Pool
+var pool *picogo.Client
 
 func main() {
 	var err error
