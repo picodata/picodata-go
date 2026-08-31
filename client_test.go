@@ -3,17 +3,33 @@ package picodata
 import (
 	"context"
 	"testing"
+	"time"
+
+	"git.picodata.io/core/drivers/picodata-go/internal/testenv"
+	"git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// tierAddresses splits the online nodes of a topology by tier.
+func tierAddresses(t *testing.T, cluster *topology.ClusterTopology, tier string) []string {
+	t.Helper()
+
+	var addrs []string
+	for _, node := range cluster.Nodes {
+		if node.State == topology.StateOnline && node.Tier == tier {
+			addrs = append(addrs, node.Address)
+		}
+	}
+
+	return addrs
+}
+
 func newEmptyPool(t *testing.T) *Client {
 	t.Helper()
-	pool := newMockPool("127.0.0.1", 5432)
-	pm := newPoolManager(pool, 1)
-	pm.removePool("127.0.0.1:5432")
+	pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
 	return &Client{pools: pm, router: newRouter(pm)}
 }
 
@@ -62,5 +78,66 @@ func TestPoolNoConnections(t *testing.T) {
 		})
 		require.NotNil(t, results)
 		assert.Error(t, results.Close())
+	})
+}
+
+func TestClientForbiddenTiers(t *testing.T) {
+	testenv.RequireCluster(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// The pool is built from the first topology snapshot, so both tiers have to
+	// be online before any of this can be asserted on.
+	testenv.WaitReady(t, ctx, 2, 2)
+
+	t.Run("WithoutFilterEveryTierIsPooled", func(t *testing.T) {
+		client, err := New(ctx, testenv.URI())
+		require.NoError(t, err)
+		defer client.Close()
+
+		arbiters := tierAddresses(t, client.manager.GetTopology(), "arbiter")
+		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
+
+		for _, addr := range arbiters {
+			assert.Contains(t, client.pools.poolsMap, addr)
+		}
+	})
+
+	t.Run("ForbiddenTierIsNotPooled", func(t *testing.T) {
+		client, err := New(ctx, testenv.URI(), WithForbiddenTiers("arbiter"))
+		require.NoError(t, err)
+		defer client.Close()
+
+		cluster := client.manager.GetTopology()
+		arbiters := tierAddresses(t, cluster, "arbiter")
+		allowed := tierAddresses(t, cluster, "default")
+
+		// The raw topology keeps tracking the hidden nodes, so the driver still
+		// notices when an allowed node comes back.
+		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
+		require.NotEmpty(t, allowed)
+
+		for _, addr := range arbiters {
+			assert.NotContains(t, client.pools.poolsMap, addr)
+		}
+
+		for _, addr := range allowed {
+			assert.Contains(t, client.pools.poolsMap, addr)
+		}
+
+		assert.Equal(t, len(allowed), client.pools.PoolSize())
+
+		var one int
+		require.NoError(t, client.QueryRow(ctx, "SELECT 1").Scan(&one))
+		assert.Equal(t, 1, one)
+	})
+
+	t.Run("EveryTierForbiddenFailsFast", func(t *testing.T) {
+		client, err := New(ctx, testenv.URI(), WithForbiddenTiers("default", "arbiter"))
+
+		require.Error(t, err)
+		assert.Nil(t, client)
+		assert.Contains(t, err.Error(), "forbidden tiers filter")
 	})
 }

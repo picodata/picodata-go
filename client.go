@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,13 +104,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		poolOpts.bootstrapHosts = append(poolOpts.bootstrapHosts, primaryAddr)
 	}
 
-	initConn, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("pgxpoll init error: %w", err)
-	}
-
-	var connPool *Client
-	pools := newPoolManager(initConn, poolOpts.maxConnsPerInstance, withPoolManagerLogger(logger))
+	pools := newPoolManager(config, poolOpts.maxConnsPerInstance, withPoolManagerLogger(logger))
 
 	routerOpts := []routerOption{withRouterLogger(logger)}
 	if poolOpts.balanceStrategy != nil {
@@ -127,16 +122,50 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts, dynamic.WithLogger(logger))
 	}
 
-	topologyManager, err := topology.NewTopologyManager(ctx, topologySource, topology.WithLogger(logger))
+	topologyOpts := []topology.Option{topology.WithLogger(logger)}
+	if len(poolOpts.forbiddenTiers) != 0 {
+		topologyOpts = append(topologyOpts, topology.WithForbiddenTiers(poolOpts.forbiddenTiers...))
+	}
+
+	topologyManager, err := topology.NewTopologyManager(ctx, topologySource, topologyOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("topology manager init error: %w", err)
 	}
 
+	// Fills the pool with the nodes of the first topology snapshot.
 	topologyManager.AddListener(pools)
 
-	connPool = &Client{pools: pools, router: router, manager: topologyManager}
+	if pools.PoolSize() == 0 {
+		topologyManager.Close()
+		// A concurrent update may have opened a pool after the size was read,
+		// and there would be no handle left to close it.
+		pools.close()
 
-	return connPool, nil
+		return nil, emptyPoolError(topologyManager, poolOpts.forbiddenTiers)
+	}
+
+	return &Client{pools: pools, router: router, manager: topologyManager}, nil
+}
+
+// emptyPoolError explains why the initial topology produced no usable connection:
+// the cluster reported no online node at all, the filters hid every one of them,
+// or every allowed node failed to open a pool.
+func emptyPoolError(manager *topology.Manager, forbiddenTiers []string) error {
+	if online := manager.GetFilteredTopology().OnlineCount(); online != 0 {
+		// The per-node reason is logged where it happens: carrying it all the
+		// way here would mean keeping it on the pool manager for the lifetime
+		// of the client to serve a single message.
+		return fmt.Errorf("failed to open a pool for any of %d online nodes, see the log for per-node errors", online)
+	}
+
+	if len(forbiddenTiers) != 0 && manager.GetTopology().OnlineCount() != 0 {
+		return fmt.Errorf(
+			"no online nodes available after applying forbidden tiers filter: %s",
+			strings.Join(forbiddenTiers, ","),
+		)
+	}
+
+	return errors.New("no online nodes discovered")
 }
 
 // Config returns a copy of config that was used to initialize this pool.

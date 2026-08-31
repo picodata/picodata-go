@@ -27,22 +27,38 @@ test:
     FF_NETWORK_PER_BUILD: 1
     # picodata env
     PICODATA_PEER: picodata-1:3301
-    PICODATA_INIT_REPLICATION_FACTOR: 2
+    PICODATA_INIT_REPLICATION_FACTOR: 1
     PICODATA_ADMIN_PASSWORD: $PICOPASS
     PICODATA_TEST_CONN: "postgresql://admin:$PICOPASS@picodata-1:5432"
+  # Every service listens on its own port: on the Kubernetes executor they share
+  # a single network namespace, so the aliases below all resolve to 127.0.0.1
+  # and two instances asking for the same port would collide. The loser joins
+  # raft and then dies on the bind, leaving an instance that is registered in
+  # the cluster but permanently Offline.
   services:
+    # The cluster is bootstrapped with two tiers so that the topology filter
+    # tests have something to filter out.
     - name: $PICODATA_IMAGE
       alias: picodata-1
+      command:
+        - run
+        - -c
+        - 'cluster.tier={"default":{"replication_factor":1,"bucket_count":3000,"can_vote":true},"arbiter":{"replication_factor":1,"bucket_count":3000,"can_vote":true}}'
       variables:
         PICODATA_LISTEN: picodata-1:3301
         PICODATA_ADVERTISE: picodata-1:3301
         PICODATA_PG_LISTEN: picodata-1:5432
         PICODATA_HTTP_LISTEN: picodata-1:8001
+        PICODATA_INSTANCE_TIER: default
     - name: $PICODATA_IMAGE
       alias: picodata-2
       variables:
         PICODATA_LISTEN: picodata-2:3302
         PICODATA_ADVERTISE: picodata-2:3302
         PICODATA_HTTP_LISTEN: picodata-2:8002
+        PICODATA_PG_LISTEN: picodata-2:5433
+        PICODATA_INSTANCE_TIER: arbiter
+  # The cluster is already provided by the job services, so the suite runs
+  # directly instead of bringing up its own compose environment.
   script:
-    - make test
+    - make test-all

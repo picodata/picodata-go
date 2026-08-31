@@ -33,18 +33,16 @@ func withPoolManagerLogger(l *slog.Logger) poolManagerOption {
 	}
 }
 
-func newPoolManager(initPool *pgxpool.Pool, connPerInstance int32, opts ...poolManagerOption) *poolManager {
-	pools := make([]*pgxpool.Pool, 0, 1)
-	poolsIndex := make(map[string]int, 1)
-
-	pools = append(pools, initPool)
-	poolsIndex[poolAddr(initPool)] = 0
-
+// newPoolManager creates an empty manager: pools are opened later, when the
+// topology manager reports the nodes to connect to. The bootstrap host from the
+// DSN gets no special treatment, so it is subject to topology filters like any
+// other node.
+func newPoolManager(config *pgxpool.Config, connPerInstance int32, opts ...poolManagerOption) *poolManager {
 	pm := &poolManager{
 		logger:                slog.New(slog.DiscardHandler),
-		config:                initPool.Config().Copy(),
-		pools:                 pools,
-		poolsMap:              poolsIndex,
+		config:                config.Copy(),
+		pools:                 make([]*pgxpool.Pool, 0, 1),
+		poolsMap:              make(map[string]int, 1),
 		connectionPerInstance: connPerInstance,
 	}
 
@@ -222,6 +220,10 @@ func (pm *poolManager) OnTopologyChanged(topology *tpm.ClusterTopology) {
 		case tpm.StateOffline:
 			pm.removePool(nodeInfo.Address)
 		default:
+			pm.logger.Warn("node with unknown state is ignored",
+				slog.Any("address", nodeInfo.Address),
+				slog.Any("state", nodeInfo.State),
+			)
 		}
 	}
 

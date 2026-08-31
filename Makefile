@@ -1,4 +1,7 @@
-.PHONY: lint fmt test clean all
+.PHONY: lint fmt test test-all test-unit clean all run-env stop-env wait-env image push_image
+
+COMPOSE = docker compose -f build/docker-compose.yml
+RUNNER_IMAGE = docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1
 
 all: lint test
 
@@ -9,17 +12,45 @@ lint:
 fmt:
 	go fmt
 
-test:
+# test runs the whole suite inside the cluster network. Picodata instances
+# advertise their container addresses, and the driver connects to the addresses
+# the topology reports, so the published ports are of no use here.
+test: run-env wait-env
+	$(COMPOSE) run --rm test-runner make test-all
+
+# test-all expects a reachable cluster: it is what runs inside the test runner
+# and in CI, where the cluster is provided by the job services.
+test-all:
 	go test -v ./...
 
-run-env: stop-env
-	docker compose -f build/docker-compose.yml up -d
+# test-unit runs the tests that need no cluster, so it works on the host as is.
+test-unit:
+	go test -v -short ./...
 
+run-env: stop-env
+	$(COMPOSE) up -d
+
+# stop-env keeps the named volumes: they hold the module and build caches, and
+# the cluster state lives in the bind-mounted instance directories instead.
+# Those the compose teardown leaves behind, and picodata refuses to restart an
+# instance whose tier changed, so they are wiped through a container - the files
+# belong to root.
 stop-env:
-	docker compose -f build/docker-compose.yml down -v
+	$(COMPOSE) down
+	$(COMPOSE) run --rm -v "$(CURDIR)/tmp:/pico" test-runner rm -rf /pico/data
+
+# wait-env blocks until every instance accepts pgproto connections.
+wait-env:
+	@$(COMPOSE) run --rm test-runner bash -c 'for host in picodata-1-1 picodata-1-2 picodata-2-1 picodata-2-2; do \
+		for i in $$(seq 1 60); do \
+			(exec 3<>/dev/tcp/$$host/5432) 2>/dev/null && break; \
+			if [ $$i = 60 ]; then echo "timeout waiting for $$host"; exit 1; fi; \
+			sleep 1; \
+		done; \
+	done; echo "cluster is up"'
 
 image:
-	docker build -f build/Dockerfile.test-runner -t docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1 .
+	docker build -f build/Dockerfile.test-runner -t $(RUNNER_IMAGE) .
 
 push_image: image
-	docker push docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1
+	docker push $(RUNNER_IMAGE)

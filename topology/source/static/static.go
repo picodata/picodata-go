@@ -21,6 +21,9 @@ func New(addrs []string) *Source {
 		nodes[id] = topology.NodeInfo{
 			ID:      id,
 			Address: addr,
+			// A statically configured node is assumed to be usable: consumers
+			// skip everything that is not Online.
+			State: topology.StateOnline,
 		}
 	}
 

@@ -9,11 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newMockPool(host string, port int) *pgxpool.Pool {
+func newMockConfig(host string, port int) *pgxpool.Config {
 	cfg, _ := pgxpool.ParseConfig("")
 	cfg.ConnConfig.Host = host
 	cfg.ConnConfig.Port = uint16(port)
-	p, _ := pgxpool.NewWithConfig(context.Background(), cfg)
+	return cfg
+}
+
+func newMockPool(host string, port int) *pgxpool.Pool {
+	p, _ := pgxpool.NewWithConfig(context.Background(), newMockConfig(host, port))
 	return p
 }
 
@@ -21,9 +25,9 @@ func newMockPool(host string, port int) *pgxpool.Pool {
 // pools/poolsMap directly rather than going through addPool, which would build
 // a fresh pgxpool out of the config instead of taking the one handed to it.
 func newTestPoolManager(pools ...*pgxpool.Pool) *poolManager {
-	pm := newPoolManager(pools[0], 1)
+	pm := newPoolManager(pools[0].Config(), 1)
 
-	for _, p := range pools[1:] {
+	for _, p := range pools {
 		pm.pools = append(pm.pools, p)
 		pm.poolsMap[poolAddr(p)] = len(pm.pools) - 1
 	}
@@ -33,11 +37,30 @@ func newTestPoolManager(pools ...*pgxpool.Pool) *poolManager {
 
 func TestPoolManager(t *testing.T) {
 	t.Run("TestNewPoolManager", func(t *testing.T) {
-		pm := newPoolManager(newMockPool("127.0.0.1", 5432), 1)
+		// The manager starts empty: pools are opened from the topology, the
+		// bootstrap host of the config included.
+		pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
 
 		require.NotNil(t, pm)
-		assert.Len(t, pm.pools, 1)
+		assert.Empty(t, pm.pools)
+		assert.Equal(t, 0, pm.PoolSize())
+	})
+
+	t.Run("TestAddPool", func(t *testing.T) {
+		pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
+
+		require.NoError(t, pm.addPool("127.0.0.1:5433"))
+
+		require.Len(t, pm.pools, 1)
 		assert.Equal(t, 1, pm.PoolSize())
+		assert.Equal(t, "127.0.0.1:5433", poolAddr(pm.pools[0]))
+	})
+
+	t.Run("TestAddPoolInvalidAddress", func(t *testing.T) {
+		pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
+
+		assert.Error(t, pm.addPool("127.0.0.1"))
+		assert.Equal(t, 0, pm.PoolSize())
 	})
 
 	t.Run("TestRemoveUnknownConnectionNoEffect", func(t *testing.T) {
@@ -53,7 +76,7 @@ func TestPoolManager(t *testing.T) {
 
 	t.Run("TestRemoveConnection", func(t *testing.T) {
 		pool := newMockPool("127.0.0.1", 5432)
-		pm := newPoolManager(pool, 1)
+		pm := newTestPoolManager(pool)
 
 		pm.removePool(poolAddr(pool))
 

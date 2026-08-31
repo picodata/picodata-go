@@ -12,6 +12,7 @@ type clientOpts struct {
 	logger                *slog.Logger
 	topologySource        topology.Source
 	balanceStrategy       strategies.BalanceStrategy
+	forbiddenTiers        []string
 	bootstrapHosts        []string
 	disableTopologyUpdate bool
 	maxConnsPerInstance   int32
@@ -85,6 +86,22 @@ func WithBootstrapHosts(hosts ...string) PoolOption {
 func WithMaxConnPerInstance(maxConns int32) PoolOption {
 	return func(p *clientOpts) error {
 		p.maxConnsPerInstance = maxConns
+		return nil
+	}
+}
+
+// WithForbiddenTiers excludes nodes of the given tiers from the connection pool,
+// for example WithForbiddenTiers("arbiter", "readonly").
+//
+// Filtering applies to the pools the client routes user queries to. Topology
+// discovery itself is not affected: the driver keeps polling the excluded nodes,
+// so it still notices when the allowed ones come back online.
+//
+// Empty and whitespace-only entries are ignored.
+func WithForbiddenTiers(tiers ...string) PoolOption {
+	return func(p *clientOpts) error {
+		p.forbiddenTiers = append(p.forbiddenTiers, tiers...)
+
 		return nil
 	}
 }

@@ -1,14 +1,19 @@
-version: '3.10'
-
 services:
   picodata-1-1:
     image: docker.binary.picodata.io/picodata:25.2.1-distroless-amd64
     container_name: picodata-1-1
     hostname: picodata-1-1
+    # The cluster is bootstrapped with two tiers so that the driver tests have
+    # something to filter out.
+    command:
+      - run
+      - -c
+      - 'cluster.tier={"default":{"replication_factor":2,"bucket_count":3000,"can_vote":true},"arbiter":{"replication_factor":2,"bucket_count":3000,"can_vote":true}}'
     environment:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-1-1:3301
       PICODATA_INSTANCE_DIR: /pico/data/picodata-1-1
+      PICODATA_INSTANCE_TIER: default
       PICODATA_ADVERTISE: picodata-1-1:3301
       PICODATA_FAILURE_DOMAIN: HOST=picodata-1
       PICODATA_INIT_REPLICATION_FACTOR: 2
@@ -17,7 +22,7 @@ services:
       PICODATA_ADMIN_PASSWORD: T0psecret
       PICODATA_LOG_LEVEL: info
     volumes:
-      - $PWD/tmp:/pico
+      - ../tmp:/pico
     ports:
       - "13301:3301"
       - "18301:8001"
@@ -31,6 +36,7 @@ services:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-1-2:3301
       PICODATA_INSTANCE_DIR: /pico/data/picodata-1-2
+      PICODATA_INSTANCE_TIER: arbiter
       PICODATA_ADVERTISE: picodata-1-2:3301
       PICODATA_FAILURE_DOMAIN: HOST=picodata-1
       PICODATA_INIT_REPLICATION_FACTOR: 2
@@ -38,7 +44,7 @@ services:
       PICODATA_PG_LISTEN: picodata-1-2:5432
       PICODATA_LOG_LEVEL: info
     volumes:
-      - $PWD/tmp:/pico
+      - ../tmp:/pico
     ports:
       - "13302:3301"
       - "18302:8001"
@@ -52,6 +58,7 @@ services:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-2-1:3301
       PICODATA_INSTANCE_DIR: /pico/data/picodata-2-1
+      PICODATA_INSTANCE_TIER: default
       PICODATA_ADVERTISE: picodata-2-1:3301
       PICODATA_FAILURE_DOMAIN: HOST=picodata-2
       PICODATA_INIT_REPLICATION_FACTOR: 2
@@ -59,7 +66,7 @@ services:
       PICODATA_PG_LISTEN: picodata-2-1:5432
       PICODATA_LOG_LEVEL: info
     volumes:
-      - $PWD/tmp:/pico
+      - ../tmp:/pico
     ports:
       - "13303:3301"
       - "18303:8001"
@@ -73,6 +80,7 @@ services:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-2-2:3301
       PICODATA_INSTANCE_DIR: /pico/data/picodata-2-2
+      PICODATA_INSTANCE_TIER: arbiter
       PICODATA_ADVERTISE: picodata-2-2:3301
       PICODATA_FAILURE_DOMAIN: HOST=picodata-2
       PICODATA_INIT_REPLICATION_FACTOR: 2
@@ -80,8 +88,30 @@ services:
       PICODATA_PG_LISTEN: picodata-2-2:5432
       PICODATA_LOG_LEVEL: info
     volumes:
-      - $PWD/tmp:/pico
+      - ../tmp:/pico
     ports:
       - "13304:3301"
       - "18304:8001"
       - "55435:5432"
+
+  # Runs the test suite inside the cluster network: instances advertise their
+  # container addresses, and the driver connects to the addresses the topology
+  # reports, not to the published ports.
+  test-runner:
+    image: docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    working_dir: /usr/src/app
+    environment:
+      PICODATA_TEST_CONN: "postgresql://admin:T0psecret@picodata-1-1:5432?sslmode=disable"
+    volumes:
+      - ..:/usr/src/app
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+    profiles:
+      - test
+
+volumes:
+  go-mod-cache:
+  go-build-cache:

@@ -46,9 +46,7 @@ func TestRouter(t *testing.T) {
 	})
 
 	t.Run("TestNextConnectionEmptyReleasesLock", func(t *testing.T) {
-		pool := newMockPool("127.0.0.1", 5432)
-		pm := newPoolManager(pool, 1)
-		pm.removePool(poolAddr(pool))
+		pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
 
 		r := newRouter(pm)
 
