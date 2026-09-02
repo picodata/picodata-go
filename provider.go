@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
-	"strings"
 	"sync"
 
 	tpm "git.picodata.io/core/drivers/picodata-go/topology"
@@ -87,6 +87,17 @@ func (pm *poolManager) pick(indexFn func(size int) uint64) *pgxpool.Pool {
 }
 
 func (pm *poolManager) addPool(address string) error {
+	host, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid address format: %q", address)
+	}
+
+	// Convert port from string to integer
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("parse port error [port: %s]: %w", portStr, err)
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -95,22 +106,11 @@ func (pm *poolManager) addPool(address string) error {
 		return nil
 	}
 
-	hostAndPort := strings.Split(address, ":")
-	if len(hostAndPort) != 2 {
-		return fmt.Errorf("invalid address format: %q", address)
-	}
-
 	// Create a new config for connection
 	connCfg := pm.config.Copy()
-	connCfg.ConnConfig.Host = hostAndPort[0]
+	connCfg.ConnConfig.Host = host
 	if pm.connectionPerInstance != 0 {
 		connCfg.MaxConns = int32(pm.connectionPerInstance)
-	}
-
-	// Convert port from string to integer
-	port, err := strconv.Atoi(hostAndPort[1])
-	if err != nil {
-		return fmt.Errorf("parse port error [port: %s]: %w", hostAndPort[1], err)
 	}
 
 	// Picodata provides valid port, so casting is safe
@@ -125,7 +125,7 @@ func (pm *poolManager) addPool(address string) error {
 	pm.pools = append(pm.pools, pool)
 	pm.poolsMap[address] = len(pm.pools) - 1
 
-	pm.logger.Debug("a pool for address was appended", slog.Any("address", address))
+	pm.logger.Debug("a pool for address was appended", slog.String("address", address))
 
 	return nil
 }
@@ -157,7 +157,7 @@ func (pm *poolManager) removePool(address string) {
 	// Delete pool from pools slice by truncating it
 	pm.pools = pm.pools[:len(pm.pools)-1]
 
-	pm.logger.Debug("a pool for address was removed", slog.Any("address", address))
+	pm.logger.Debug("a pool for address was removed", slog.String("address", address))
 }
 
 func (pm *poolManager) close() {
