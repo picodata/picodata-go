@@ -102,23 +102,23 @@ func (pm *poolManager) addPool(address string) error {
 	defer pm.mu.Unlock()
 
 	if _, ok := pm.poolsMap[address]; ok {
-		pm.logger.Warn("already exists")
+		pm.logger.Warn("pool already exists", slog.String("address", address))
 		return nil
 	}
 
 	// Create a new config for connection
 	connCfg := pm.config.Copy()
 	connCfg.ConnConfig.Host = host
+	// Picodata provides valid port, so casting is safe
+	connCfg.ConnConfig.Port = uint16(port)
+
 	if pm.connectionPerInstance != 0 {
 		connCfg.MaxConns = int32(pm.connectionPerInstance)
 	}
 
-	// Picodata provides valid port, so casting is safe
-	connCfg.ConnConfig.Port = uint16(port)
-
 	pool, err := pgxpool.NewWithConfig(context.Background(), connCfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create pgxpool: %w", err)
 	}
 
 	// Add pool to the pools slice
@@ -132,32 +132,42 @@ func (pm *poolManager) addPool(address string) error {
 
 func (pm *poolManager) removePool(address string) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 
 	// If pool for address doesn't exist -> return
 	index, ok := pm.poolsMap[address]
 	if !ok {
-		pm.logger.Warn("a pool for address not found", slog.Any("address", address))
+		pm.mu.Unlock()
+		pm.logger.Warn("a pool for address not found", slog.String("address", address))
 		return
 	}
 
-	// Get address of last pool
-	lastPoolAddr := poolAddr(pm.pools[len(pm.pools)-1])
+	// Keep reference to the pool that will be closed asynchronously
+	poolToClose := pm.pools[index]
 
 	// Remove entry about pool from poolsIndex
 	delete(pm.poolsMap, address)
 
+	lastPoolIdx := len(pm.pools) - 1
 	// If deleted pool isn't last in the slice
-	if index != len(pm.pools)-1 {
+	if index != lastPoolIdx {
+		lastPoolAddr := poolAddr(pm.pools[lastPoolIdx])
 		// Move last pool to the position of deleted one
-		pm.pools[index] = pm.pools[len(pm.pools)-1]
+		pm.pools[index] = pm.pools[lastPoolIdx]
 		// Update index of last pool in poolsIndex
 		pm.poolsMap[lastPoolAddr] = index
 	}
 	// Delete pool from pools slice by truncating it
-	pm.pools = pm.pools[:len(pm.pools)-1]
+	pm.pools = pm.pools[:lastPoolIdx]
 
 	pm.logger.Debug("a pool for address was removed", slog.String("address", address))
+
+	pm.mu.Unlock()
+
+	// Close the pool in background to avoid blocking the manager
+	go func() {
+		poolToClose.Close()
+		pm.logger.Debug("pool closed", slog.String("address", address))
+	}()
 }
 
 func (pm *poolManager) close() {
