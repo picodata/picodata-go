@@ -24,7 +24,10 @@ func (s staleIndexStrategy) Type() string {
 func TestRouter(t *testing.T) {
 	t.Run("TestNextConnection", func(t *testing.T) {
 		pool1, pool2 := newMockPool("127.0.0.1", 5432), newMockPool("127.0.0.1", 5433)
-		r := newRouter(newTestPoolManager(pool1, pool2))
+		r := newRouter(newTestPoolManager(
+			instance{"uuid-1", pool1},
+			instance{"uuid-2", pool2},
+		))
 
 		// Default strategy is RoundRobin
 		assert.Equal(t, pool1, r.nextConnection())
@@ -38,7 +41,10 @@ func TestRouter(t *testing.T) {
 		// randomStrategy.Next returns the value it swapped out, so it can hand
 		// back an index taken modulo a pool count that no longer holds. Emulate
 		// a cluster that shrank from 5 pools to 2 right after the strategy ran.
-		r := newRouter(newTestPoolManager(pool1, pool2), withBalanceStrategy(staleIndexStrategy{index: 4}))
+		r := newRouter(newTestPoolManager(
+			instance{"uuid-1", pool1},
+			instance{"uuid-2", pool2},
+		), withBalanceStrategy(staleIndexStrategy{index: 4}))
 
 		conn := r.nextConnection()
 		assert.NotNil(t, conn, "a stale index must not fail a query while pools are alive")
@@ -58,7 +64,7 @@ func TestRouter(t *testing.T) {
 		// reader straight through and prove nothing.
 		lockDone := make(chan struct{})
 		go func() {
-			pm.removePool("127.0.0.1:9999")
+			pm.removePool("unknown-uuid")
 			close(lockDone)
 		}()
 
@@ -70,10 +76,13 @@ func TestRouter(t *testing.T) {
 	})
 
 	t.Run("TestNextConnectionConcurrent", func(t *testing.T) {
-		pool1, pool2, pool3 := newMockPool("addr", 0), newMockPool("addr", 1), newMockPool("addr", 2)
-		host1, host2, host3 := poolAddr(pool1), poolAddr(pool2), poolAddr(pool3)
+		pool1, pool2, pool3 := newMockPool("addr", 1), newMockPool("addr", 2), newMockPool("addr", 3)
 
-		pm := newTestPoolManager(pool1, pool2, pool3)
+		pm := newTestPoolManager(
+			instance{"uuid-1", pool1},
+			instance{"uuid-2", pool2},
+			instance{"uuid-3", pool3},
+		)
 		r := newRouter(pm)
 
 		wg := sync.WaitGroup{}
@@ -91,16 +100,17 @@ func TestRouter(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			pm.removePool(host3)
-			pm.removePool(host2)
-			_ = pm.addPool(host3)
-			pm.removePool(host1)
+			pm.removePool("uuid-3")
+			pm.removePool("uuid-2")
+			_ = pm.addPool("uuid-3", "addr:3")
+			pm.removePool("uuid-1")
 		}()
 
 		wg.Wait()
 
-		require.Len(t, pm.pools, 1)
-		assert.Equal(t, host3, poolAddr(pm.pools[0]), "the re-added pool is the only survivor")
+		require.Len(t, pm.instances, 1)
+		assert.Equal(t, "uuid-3", pm.instances[0].uuid, "the re-added pool is the only survivor")
+		assert.Equal(t, 0, pm.poolsMap["uuid-3"])
 		assert.Equal(t, 1, pm.PoolSize())
 	})
 }

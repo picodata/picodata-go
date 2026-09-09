@@ -13,18 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// tierAddresses splits the online nodes of a topology by tier.
-func tierAddresses(t *testing.T, cluster *topology.ClusterTopology, tier string) []string {
+// tierNodeIDs splits the online nodes of a topology by tier. The pool manager
+// is keyed by node uuid, so the ids are what the assertions below look up.
+func tierNodeIDs(t *testing.T, cluster *topology.ClusterTopology, tier string) []string {
 	t.Helper()
 
-	var addrs []string
+	var ids []string
 	for _, node := range cluster.Nodes {
 		if node.State == topology.StateOnline && node.Tier == tier {
-			addrs = append(addrs, node.Address)
+			ids = append(ids, node.ID)
 		}
 	}
 
-	return addrs
+	return ids
 }
 
 func newEmptyPool(t *testing.T) *Client {
@@ -96,11 +97,11 @@ func TestClientForbiddenTiers(t *testing.T) {
 		require.NoError(t, err)
 		defer client.Close()
 
-		arbiters := tierAddresses(t, client.manager.GetTopology(), "arbiter")
+		arbiters := tierNodeIDs(t, client.manager.GetTopology(), "arbiter")
 		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
 
-		for _, addr := range arbiters {
-			assert.Contains(t, client.pools.poolsMap, addr)
+		for _, id := range arbiters {
+			assert.Contains(t, client.pools.poolsMap, id)
 		}
 	})
 
@@ -110,20 +111,20 @@ func TestClientForbiddenTiers(t *testing.T) {
 		defer client.Close()
 
 		cluster := client.manager.GetTopology()
-		arbiters := tierAddresses(t, cluster, "arbiter")
-		allowed := tierAddresses(t, cluster, "default")
+		arbiters := tierNodeIDs(t, cluster, "arbiter")
+		allowed := tierNodeIDs(t, cluster, "default")
 
 		// The raw topology keeps tracking the hidden nodes, so the driver still
 		// notices when an allowed node comes back.
 		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
 		require.NotEmpty(t, allowed)
 
-		for _, addr := range arbiters {
-			assert.NotContains(t, client.pools.poolsMap, addr)
+		for _, id := range arbiters {
+			assert.NotContains(t, client.pools.poolsMap, id)
 		}
 
-		for _, addr := range allowed {
-			assert.Contains(t, client.pools.poolsMap, addr)
+		for _, id := range allowed {
+			assert.Contains(t, client.pools.poolsMap, id)
 		}
 
 		assert.Equal(t, len(allowed), client.pools.PoolSize())

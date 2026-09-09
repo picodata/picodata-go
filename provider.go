@@ -13,15 +13,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// instance is a pool together with the identity of the node it serves. The
+// uuid travels with the pool because the swap-remove in removePool has to know
+// the key of the entry it moves, and unlike the address it used to key on,
+// a uuid cannot be derived back from a *pgxpool.Pool.
+type instance struct {
+	uuid string
+	pool *pgxpool.Pool
+}
+
 type poolManager struct {
-	logger *slog.Logger
-	mu     sync.RWMutex
-	config *pgxpool.Config
-	pools  []*pgxpool.Pool
-	// Key: instance address
-	// Value: index of corresponding *pgxpool.Pool in [poolManager] pools slice
+	logger    *slog.Logger
+	mu        sync.RWMutex
+	config    *pgxpool.Config
+	instances []instance
+	// Key: instance uuid
+	// Value: index of corresponding instance in [poolManager] instances slice
 	poolsMap              map[string]int
 	connectionPerInstance int32
+	// closing counts the pools that removePool handed to a background
+	// goroutine but that have not finished closing yet, so close() can honour
+	// the "blocks until all connections are returned" contract of Client.Close.
+	closing sync.WaitGroup
 }
 
 type poolManagerOption func(*poolManager)
@@ -41,7 +54,7 @@ func newPoolManager(config *pgxpool.Config, connPerInstance int32, opts ...poolM
 	pm := &poolManager{
 		logger:                slog.New(slog.DiscardHandler),
 		config:                config.Copy(),
-		pools:                 make([]*pgxpool.Pool, 0, 1),
+		instances:             make([]instance, 0, 1),
 		poolsMap:              make(map[string]int, 1),
 		connectionPerInstance: connPerInstance,
 	}
@@ -75,7 +88,7 @@ func (pm *poolManager) pick(indexFn func(size int) uint64) *pgxpool.Pool {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	size := len(pm.pools)
+	size := len(pm.instances)
 	if size == 0 {
 		return nil
 	}
@@ -83,10 +96,10 @@ func (pm *poolManager) pick(indexFn func(size int) uint64) *pgxpool.Pool {
 	index := indexFn(size)
 	index %= uint64(size)
 
-	return pm.pools[index]
+	return pm.instances[index].pool
 }
 
-func (pm *poolManager) addPool(address string) error {
+func (pm *poolManager) addPool(uuid string, address string) error {
 	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("invalid address format: %q", address)
@@ -94,15 +107,19 @@ func (pm *poolManager) addPool(address string) error {
 
 	// Convert port from string to integer
 	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
+	if err != nil {
 		return fmt.Errorf("parse port error [port: %s]: %w", portStr, err)
+	}
+
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port out of range [port: %d]", port)
 	}
 
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if _, ok := pm.poolsMap[address]; ok {
-		pm.logger.Warn("pool already exists", slog.String("address", address))
+	if _, ok := pm.poolsMap[uuid]; ok {
+		pm.logger.Warn("pool already exists", slog.String("uuid", uuid))
 		return nil
 	}
 
@@ -121,70 +138,99 @@ func (pm *poolManager) addPool(address string) error {
 		return fmt.Errorf("failed to create pgxpool: %w", err)
 	}
 
-	// Add pool to the pools slice
-	pm.pools = append(pm.pools, pool)
-	pm.poolsMap[address] = len(pm.pools) - 1
+	// Add pool to the instances slice
+	pm.instances = append(pm.instances, instance{uuid: uuid, pool: pool})
+	pm.poolsMap[uuid] = len(pm.instances) - 1
 
-	pm.logger.Debug("a pool for address was appended", slog.String("address", address))
+	pm.logger.Debug("a pool for instance was appended",
+		slog.String("uuid", uuid),
+		slog.String("address", address),
+	)
 
 	return nil
 }
 
-func (pm *poolManager) removePool(address string) {
+func (pm *poolManager) removePool(uuid string) {
 	pm.mu.Lock()
 
-	// If pool for address doesn't exist -> return
-	index, ok := pm.poolsMap[address]
+	// If pool for instance doesn't exist -> return
+	index, ok := pm.poolsMap[uuid]
 	if !ok {
 		pm.mu.Unlock()
-		pm.logger.Warn("a pool for address not found", slog.String("address", address))
+		pm.logger.Warn("a pool for instance not found", slog.String("uuid", uuid))
 		return
 	}
 
 	// Keep reference to the pool that will be closed asynchronously
-	poolToClose := pm.pools[index]
+	poolToClose := pm.instances[index].pool
 
 	// Remove entry about pool from poolsIndex
-	delete(pm.poolsMap, address)
+	delete(pm.poolsMap, uuid)
 
-	lastPoolIdx := len(pm.pools) - 1
+	lastPoolIdx := len(pm.instances) - 1
 	// If deleted pool isn't last in the slice
 	if index != lastPoolIdx {
-		lastPoolAddr := poolAddr(pm.pools[lastPoolIdx])
 		// Move last pool to the position of deleted one
-		pm.pools[index] = pm.pools[lastPoolIdx]
-		// Update index of last pool in poolsIndex
-		pm.poolsMap[lastPoolAddr] = index
+		pm.instances[index] = pm.instances[lastPoolIdx]
+		// Update index of moved pool in poolsIndex
+		pm.poolsMap[pm.instances[index].uuid] = index
 	}
-	// Delete pool from pools slice by truncating it
-	pm.pools = pm.pools[:lastPoolIdx]
+	// Clear the tail before truncating: the slot stays alive beyond len until
+	// the next append overwrites it, and with it the removed pool
+	pm.instances[lastPoolIdx] = instance{}
+	// Delete pool from instances slice by truncating it
+	pm.instances = pm.instances[:lastPoolIdx]
 
-	pm.logger.Debug("a pool for address was removed", slog.String("address", address))
+	pm.logger.Debug("a pool for instance was removed", slog.String("uuid", uuid))
+
+	// Register the pending close while still holding the lock: close() waits
+	// with the lock held, so the counter cannot rise from zero behind its back.
+	pm.closing.Add(1)
 
 	pm.mu.Unlock()
 
 	// Close the pool in background to avoid blocking the manager
 	go func() {
+		defer pm.closing.Done()
+
 		poolToClose.Close()
-		pm.logger.Debug("pool closed", slog.String("address", address))
+		pm.logger.Debug("pool closed", slog.String("uuid", uuid))
 	}()
 }
 
+// close closes every pool the manager owns and blocks until they are done,
+// including the ones removePool is still closing in the background.
 func (pm *poolManager) close() {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+	pm.mu.Lock()
 
-	for _, pool := range pm.pools {
-		pool.Close()
+	// Take the pools away from the manager before closing them, so a pick that
+	// races close finds nothing instead of a pool that is already going away.
+	instances := pm.instances
+	pm.instances = nil
+	// Emptying the index is also what makes the wait below safe: removePool
+	// registers a pending close only for an entry it found here, and it holds
+	// pm.mu from that lookup until the counter is raised, so once this returns
+	// no Add can still be on its way.
+	pm.poolsMap = map[string]int{}
+
+	pm.mu.Unlock()
+
+	// Closing blocks until every checked-out connection is returned, and the
+	// callers holding those connections have to go through pick to return
+	// them, so the lock must be released before this loop.
+	for _, in := range instances {
+		in.pool.Close()
 	}
+
+	pm.closing.Wait()
 }
 
 func (pm *poolManager) ping(ctx context.Context) error {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	for _, pool := range pm.pools {
-		if err := pingPool(ctx, pool); err != nil {
+	for _, in := range pm.instances {
+		if err := pingPool(ctx, in.pool); err != nil {
 			return err
 		}
 	}
@@ -196,8 +242,8 @@ func (pm *poolManager) reset() {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	for _, pool := range pm.pools {
-		pool.Reset()
+	for _, in := range pm.instances {
+		in.pool.Reset()
 	}
 }
 
@@ -215,23 +261,19 @@ func pingPool(ctx context.Context, p *pgxpool.Pool) error {
 	return nil
 }
 
-func poolAddr(p *pgxpool.Pool) string {
-	return fmt.Sprintf("%s:%d", p.Config().ConnConfig.Host, p.Config().ConnConfig.Port)
-}
-
 func (pm *poolManager) OnTopologyChanged(topology *tpm.ClusterTopology) {
 	for _, nodeInfo := range topology.Nodes {
 		switch nodeInfo.State {
 		case tpm.StateOnline:
-			if err := pm.addPool(nodeInfo.Address); err != nil {
-				pm.logger.Error("failed to add connection", slog.Any("addres", nodeInfo.Address), slog.Any("error", err))
+			if err := pm.addPool(nodeInfo.ID, nodeInfo.Address); err != nil {
+				pm.logger.Error("failed to add connection", slog.String("uuid", nodeInfo.ID), slog.Any("error", err))
 				continue
 			}
 		case tpm.StateOffline:
-			pm.removePool(nodeInfo.Address)
+			pm.removePool(nodeInfo.ID)
 		default:
 			pm.logger.Warn("node with unknown state is ignored",
-				slog.Any("address", nodeInfo.Address),
+				slog.String("uuid", nodeInfo.ID),
 				slog.Any("state", nodeInfo.State),
 			)
 		}
