@@ -4,40 +4,40 @@ import (
 	"log/slog"
 
 	"git.picodata.io/core/drivers/picodata-go/strategies"
+	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// router picks which pool to use for the next query, according to a
-// [strategies.BalanceStrategy]. It has no notion of topology: it only asks
-// the [poolManager] for the current pool count and the pool at a given index.
+// router picks which pool serves the next query, according to a
+// [strategies.BalanceStrategy].
+//
+// It is the driver's only topology listener: routing is meaningful only once
+// the pools it names are open, and a second listener would give no ordering.
 type router struct {
 	logger          *slog.Logger
-	pools           *poolManager
-	current         uint64
+	pm              *poolManager
 	balanceStrategy strategies.BalanceStrategy
 }
 
 type routerOption func(*router)
 
-// withRouterLogger takes the root logger and bakes the package-specific tag inside.
 func withRouterLogger(l *slog.Logger) routerOption {
 	return func(r *router) {
 		r.logger = l.With(slog.String("component", "router"))
 	}
 }
 
-// withBalanceStrategy sets the strategy used to pick a pool among the routable ones.
 func withBalanceStrategy(s strategies.BalanceStrategy) routerOption {
 	return func(r *router) {
 		r.balanceStrategy = s
 	}
 }
 
-func newRouter(pools *poolManager, opts ...routerOption) *router {
+func newRouter(pm *poolManager, opts ...routerOption) *router {
 	r := &router{
 		logger:          slog.New(slog.DiscardHandler),
-		pools:           pools,
+		pm:              pm,
 		balanceStrategy: strategies.NewRoundRobinStrategy(),
 	}
 
@@ -49,13 +49,21 @@ func newRouter(pools *poolManager, opts ...routerOption) *router {
 }
 
 func (r *router) nextConnection() *pgxpool.Pool {
-	conn := r.pools.pick(func(size int) uint64 {
-		return r.balanceStrategy.Next(&r.current, uint64(size))
-	})
+	conn := r.pm.pick(r.balanceStrategy.Next())
 
 	if conn == nil {
 		r.logger.Warn("connection not found in a pool")
 	}
 
 	return conn
+}
+
+// OnTopologyChanged implements [tpm.Listener].
+func (r *router) OnTopologyChanged(snapshot *tpm.ClusterTopology) {
+	pools := r.pm.reconcile(snapshot)
+
+	r.logger.Debug("routing updated",
+		slog.Uint64("version", snapshot.Version),
+		slog.Int("pools", pools),
+	)
 }

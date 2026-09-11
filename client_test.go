@@ -6,38 +6,16 @@ import (
 	"time"
 
 	"git.picodata.io/core/drivers/picodata-go/internal/testenv"
-	"git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// tierNodeIDs splits the online nodes of a topology by tier. The pool manager
-// is keyed by node uuid, so the ids are what the assertions below look up.
-func tierNodeIDs(t *testing.T, cluster *topology.ClusterTopology, tier string) []string {
-	t.Helper()
-
-	var ids []string
-	for _, node := range cluster.Nodes {
-		if node.State == topology.StateOnline && node.Tier == tier {
-			ids = append(ids, node.ID)
-		}
-	}
-
-	return ids
-}
-
-func newEmptyPool(t *testing.T) *Client {
-	t.Helper()
-	pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
-	return &Client{pools: pm, router: newRouter(pm)}
-}
-
 func TestPoolNoConnections(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("TestQuery", func(t *testing.T) {
+	t.Run("Query", func(t *testing.T) {
 		p := newEmptyPool(t)
 		var (
 			rows pgx.Rows
@@ -50,7 +28,7 @@ func TestPoolNoConnections(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("TestQueryRow", func(t *testing.T) {
+	t.Run("QueryRow", func(t *testing.T) {
 		p := newEmptyPool(t)
 		var err error
 		require.NotPanics(t, func() {
@@ -61,7 +39,7 @@ func TestPoolNoConnections(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("TestExec", func(t *testing.T) {
+	t.Run("Exec", func(t *testing.T) {
 		p := newEmptyPool(t)
 		var err error
 		require.NotPanics(t, func() {
@@ -70,7 +48,7 @@ func TestPoolNoConnections(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("TestSendBatch", func(t *testing.T) {
+	t.Run("SendBatch", func(t *testing.T) {
 		p := newEmptyPool(t)
 		batch := &pgx.Batch{}
 		var results pgx.BatchResults
@@ -97,12 +75,10 @@ func TestClientForbiddenTiers(t *testing.T) {
 		require.NoError(t, err)
 		defer client.Close()
 
-		arbiters := tierNodeIDs(t, client.manager.GetTopology(), "arbiter")
+		arbiters := tierNodeIDs(t, client.tpm.GetTopology(), "arbiter")
 		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
 
-		for _, id := range arbiters {
-			assert.Contains(t, client.pools.poolsMap, id)
-		}
+		assert.Subset(t, uuidsOf(*client.pm.instances.Load()), arbiters)
 	})
 
 	t.Run("ForbiddenTierIsNotPooled", func(t *testing.T) {
@@ -110,7 +86,7 @@ func TestClientForbiddenTiers(t *testing.T) {
 		require.NoError(t, err)
 		defer client.Close()
 
-		cluster := client.manager.GetTopology()
+		cluster := client.tpm.GetTopology()
 		arbiters := tierNodeIDs(t, cluster, "arbiter")
 		allowed := tierNodeIDs(t, cluster, "default")
 
@@ -119,15 +95,16 @@ func TestClientForbiddenTiers(t *testing.T) {
 		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
 		require.NotEmpty(t, allowed)
 
+		pooled := uuidsOf(*client.pm.instances.Load())
+
+		// Not NotSubset: that passes as soon as one arbiter is missing, and
+		// every one of them has to be absent.
 		for _, id := range arbiters {
-			assert.NotContains(t, client.pools.poolsMap, id)
+			assert.NotContains(t, pooled, id)
 		}
 
-		for _, id := range allowed {
-			assert.Contains(t, client.pools.poolsMap, id)
-		}
-
-		assert.Equal(t, len(allowed), client.pools.PoolSize())
+		assert.Subset(t, pooled, allowed)
+		assert.Equal(t, len(allowed), client.pm.PoolSize())
 
 		var one int
 		require.NoError(t, client.QueryRow(ctx, "SELECT 1").Scan(&one))

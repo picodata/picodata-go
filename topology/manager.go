@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -12,15 +13,14 @@ import (
 // Manager coordinates topology updates and dispatches them to listeners.
 type Manager struct {
 	logger *slog.Logger
-	// mu serializes state updates during applyAndNotify and protects the listeners slice.
-	mu        sync.Mutex
-	listeners []Listener
+
 	// current holds the cluster as reported by the source, with no filters applied.
 	current atomic.Pointer[ClusterTopology]
 	// filtered holds the view exposed to listeners: current minus the nodes
 	// rejected by filters. It shares the pointer with current when no filter
 	// is configured.
 	filtered atomic.Pointer[ClusterTopology]
+
 	// filters are combined with a logical AND and never change after construction.
 	filters []Filter
 
@@ -29,6 +29,12 @@ type Manager struct {
 	source Source
 
 	done chan struct{}
+
+	mu        sync.Mutex // serializes applyAndNotify; guards the fields below
+	listeners []Listener
+	// Newest version seen, dropped and deduplicated reports included, so it can
+	// run ahead of the stored snapshot.
+	latestVersion uint64
 }
 
 // Option applies a configuration option to the Manager.
@@ -84,9 +90,15 @@ func NewTopologyManager(parent context.Context, source Source, opts ...Option) (
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
 
+	if topology == nil {
+		cancel()
+
+		return nil, errors.New("fetch: source returned no topology")
+	}
+
+	tpm.latestVersion = topology.Version
 	tpm.store(topology.Version, topology.Nodes)
 
-	// Start live updates if the source supports streaming.
 	if sp, ok := source.(StreamingSource); ok {
 		go tpm.updateLoop(sp)
 	} else {
@@ -121,52 +133,76 @@ func (tpm *Manager) updateLoop(sp StreamingSource) {
 }
 
 func (tpm *Manager) applyAndNotify(topology *ClusterTopology) {
-	tpm.mu.Lock()
-
-	previous := tpm.current.Load()
-	current := make(map[string]NodeInfo, len(previous.Nodes))
-	maps.Copy(current, previous.Nodes)
-
-	delta := make(map[string]NodeInfo)
-	for id, newNode := range topology.Nodes {
-		node, ok := current[id]
-		if !ok || node.State != newNode.State {
-			delta[id] = newNode
-			current[id] = newNode
-		}
+	// A Source is user-supplied, so a broken one must not take the process down.
+	if topology == nil {
+		tpm.logger.Warn("nil topology report ignored")
+		return
 	}
 
-	if len(delta) == 0 {
+	tpm.mu.Lock()
+
+	if topology.Version < tpm.latestVersion {
+		tpm.logger.Warn("stale topology report ignored",
+			slog.Uint64("version", topology.Version),
+			slog.Uint64("latest", tpm.latestVersion),
+		)
+
+		tpm.mu.Unlock()
+
+		return
+	}
+
+	tpm.latestVersion = topology.Version
+
+	// An unreadable cluster, not one that lost every node.
+	if len(topology.Nodes) == 0 {
+		tpm.logger.Warn("empty topology report ignored",
+			slog.Uint64("version", topology.Version),
+		)
+
+		tpm.mu.Unlock()
+
+		return
+	}
+
+	previous := tpm.current.Load()
+
+	// The report replaces the stored view instead of merging into it, so a node
+	// it stops mentioning loses its pool rather than staying Online forever.
+	if maps.Equal(previous.Nodes, topology.Nodes) {
 		tpm.mu.Unlock()
 		return
 	}
 
-	tpm.store(topology.Version, current)
+	previousFiltered := tpm.filtered.Load()
 
-	filteredDelta := tpm.filterNodes(delta)
+	tpm.store(topology.Version, topology.Nodes)
+
+	snapshot := tpm.filtered.Load()
+
+	// Only hidden nodes changed. Without filters these are the maps the check
+	// above already compared, so skip the walk.
+	if len(tpm.filters) != 0 && maps.Equal(previousFiltered.Nodes, snapshot.Nodes) {
+		tpm.mu.Unlock()
+		return
+	}
 
 	listeners := make([]Listener, len(tpm.listeners))
 	copy(listeners, tpm.listeners)
 	tpm.mu.Unlock()
 
-	// The whole delta was filtered out: the stored snapshots are up to date,
-	// but the listeners have nothing to react to.
-	if len(filteredDelta) == 0 {
-		return
-	}
-
-	deltaTopology := &ClusterTopology{
-		Version: topology.Version,
-		Nodes:   filteredDelta,
-	}
-
 	for _, l := range listeners {
-		l.OnTopologyChanged(deltaTopology)
+		l.OnTopologyChanged(snapshot)
 	}
 }
 
-// store publishes the given cluster state as both the raw and the filtered snapshot.
+// store publishes the given cluster state as both the raw and the filtered
+// snapshot. The nodes are copied: a Source may reuse the map it hands back.
 func (tpm *Manager) store(version uint64, nodes map[string]NodeInfo) {
+	owned := make(map[string]NodeInfo, len(nodes))
+	maps.Copy(owned, nodes)
+	nodes = owned
+
 	full := &ClusterTopology{
 		Version: version,
 		Nodes:   nodes,
@@ -199,15 +235,9 @@ func (tpm *Manager) store(version uint64, nodes map[string]NodeInfo) {
 	}
 }
 
-// filterNodes returns the subset of nodes the filters allow.
-//
-// Without filters the original map is returned as is, so the common path copies
-// nothing.
+// filterNodes returns the subset of nodes the filters allow. Only called when
+// there is at least one filter: store publishes the unfiltered map directly.
 func (tpm *Manager) filterNodes(nodes map[string]NodeInfo) map[string]NodeInfo {
-	if len(tpm.filters) == 0 {
-		return nodes
-	}
-
 	filtered := make(map[string]NodeInfo, len(nodes))
 	for id, node := range nodes {
 		if tpm.allow(node) {
@@ -231,11 +261,8 @@ func (tpm *Manager) allow(node NodeInfo) bool {
 
 // AddListener registers a new listener and immediately sends the current topology to it.
 //
-// The snapshot is dispatched while the lock is held: outside it, applyAndNotify
-// could deliver a newer delta to the freshly registered listener first, and the
-// stale snapshot arriving last would leave the listener inconsistent with no
-// further delta to correct it. Listeners must therefore not call back into the
-// Manager from OnTopologyChanged.
+// Dispatched under the lock, so applyAndNotify cannot reach the fresh listener
+// first and leave this older snapshot as its last word.
 func (tpm *Manager) AddListener(listener Listener) {
 	tpm.mu.Lock()
 	defer tpm.mu.Unlock()
@@ -243,18 +270,6 @@ func (tpm *Manager) AddListener(listener Listener) {
 	tpm.listeners = append(tpm.listeners, listener)
 
 	listener.OnTopologyChanged(tpm.filtered.Load())
-}
-
-// ForceRefresh manually pulls the latest topology from the source and triggers notification.
-func (tpm *Manager) ForceRefresh(ctx context.Context) error {
-	topology, err := tpm.source.Fetch(ctx)
-	if err != nil {
-		return err
-	}
-
-	tpm.applyAndNotify(topology)
-
-	return nil
 }
 
 // GetTopology returns the most recent cluster topology state, as reported by the

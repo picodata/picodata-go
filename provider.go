@@ -7,57 +7,53 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// instance is a pool together with the identity of the node it serves. The
-// uuid travels with the pool because the swap-remove in removePool has to know
-// the key of the entry it moves, and unlike the address it used to key on,
-// a uuid cannot be derived back from a *pgxpool.Pool.
 type instance struct {
 	uuid string
+	addr string
 	pool *pgxpool.Pool
 }
 
 type poolManager struct {
-	logger    *slog.Logger
-	mu        sync.RWMutex
-	config    *pgxpool.Config
-	instances []instance
-	// Key: instance uuid
-	// Value: index of corresponding instance in [poolManager] instances slice
-	poolsMap              map[string]int
+	logger                *slog.Logger
+	config                *pgxpool.Config
 	connectionPerInstance int32
-	// closing counts the pools that removePool handed to a background
-	// goroutine but that have not finished closing yet, so close() can honour
-	// the "blocks until all connections are returned" contract of Client.Close.
+
+	// Rotation the balance strategies index into, replaced wholesale.
+	instances atomic.Pointer[[]instance]
+
+	// Departed pools still draining.
 	closing sync.WaitGroup
+
+	mu            sync.Mutex // serializes reconcile and close; guards the fields below
+	latestVersion uint64
+	closed        bool
 }
 
 type poolManagerOption func(*poolManager)
 
-// withPoolManagerLogger takes the root logger and bakes the package-specific tag inside.
 func withPoolManagerLogger(l *slog.Logger) poolManagerOption {
 	return func(pm *poolManager) {
 		pm.logger = l.With(slog.String("component", "pool_manager"))
 	}
 }
 
-// newPoolManager creates an empty manager: pools are opened later, when the
-// topology manager reports the nodes to connect to. The bootstrap host from the
-// DSN gets no special treatment, so it is subject to topology filters like any
-// other node.
+// newPoolManager opens no pools: the first reconcile does, the DSN's own host
+// included and filtered like any other node.
 func newPoolManager(config *pgxpool.Config, connPerInstance int32, opts ...poolManagerOption) *poolManager {
 	pm := &poolManager{
 		logger:                slog.New(slog.DiscardHandler),
 		config:                config.Copy(),
-		instances:             make([]instance, 0, 1),
-		poolsMap:              make(map[string]int, 1),
 		connectionPerInstance: connPerInstance,
 	}
+
+	pm.instances.Store(new([]instance))
 
 	for _, opt := range opts {
 		opt(pm)
@@ -67,66 +63,153 @@ func newPoolManager(config *pgxpool.Config, connPerInstance int32, opts ...poolM
 }
 
 func (pm *poolManager) PoolSize() int {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	return len(pm.poolsMap)
+	return len(*pm.instances.Load())
 }
 
 func (pm *poolManager) getConfig() *pgxpool.Config {
 	return pm.config.Copy()
 }
 
-// pick selects a pool under a single lock: indexFn receives the current pool
-// count and returns the index to use, so the count it saw and the slice it
-// indexes into can never be torn apart by a concurrent addPool/removePool.
-//
-// indexFn runs while pm.mu is held for reading, so it must not call back into
-// the poolManager: sync.RWMutex is not reentrant, and a writer waiting on
-// addPool/removePool would deadlock a nested RLock.
-func (pm *poolManager) pick(indexFn func(size int) uint64) *pgxpool.Pool {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+// pick maps a strategy's selector onto one immutable rotation.
+func (pm *poolManager) pick(selector uint64) *pgxpool.Pool {
+	pools := *pm.instances.Load()
 
-	size := len(pm.instances)
+	size := len(pools)
 	if size == 0 {
 		return nil
 	}
 
-	index := indexFn(size)
+	index := selector
 	index %= uint64(size)
 
-	return pm.instances[index].pool
+	return pools[index].pool
 }
 
-func (pm *poolManager) addPool(uuid string, address string) error {
-	host, portStr, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("invalid address format: %q", address)
-	}
-
-	// Convert port from string to integer
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return fmt.Errorf("parse port error [port: %s]: %w", portStr, err)
-	}
-
-	if port < 1 || port > 65535 {
-		return fmt.Errorf("port out of range [port: %d]", port)
-	}
-
+// reconcile brings the open pools in line with the snapshot and returns how
+// many it left open.
+func (pm *poolManager) reconcile(snapshot *tpm.ClusterTopology) int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if _, ok := pm.poolsMap[uuid]; ok {
-		pm.logger.Warn("pool already exists", slog.String("uuid", uuid))
-		return nil
+	// close() is final: a late reconcile would reopen pools nobody closes.
+	if pm.closed {
+		return 0
 	}
 
-	// Create a new config for connection
+	current := *pm.instances.Load()
+
+	if snapshot.Version < pm.latestVersion {
+		pm.logger.Warn("stale topology snapshot ignored",
+			slog.Uint64("version", snapshot.Version),
+			slog.Uint64("latest", pm.latestVersion),
+		)
+
+		return len(current)
+	}
+
+	pm.latestVersion = snapshot.Version
+
+	next := make([]instance, 0, len(current))
+	kept := make(map[string]struct{}, len(current))
+
+	// A node that changed address is not a survivor: its pool points at the old host.
+	for _, inst := range current {
+		node, ok := snapshot.Nodes[inst.uuid]
+		if !ok || node.State != tpm.StateOnline || node.Address != inst.addr {
+			continue
+		}
+
+		next = append(next, inst)
+		kept[inst.uuid] = struct{}{}
+	}
+
+	for uuid, node := range snapshot.Nodes {
+
+		switch node.State {
+		case tpm.StateOnline:
+			// Opened below.
+		case tpm.StateOffline:
+			continue
+		default:
+			pm.logger.Warn("node with unknown state is ignored",
+				slog.String("uuid", uuid),
+				slog.String("state", node.State),
+			)
+
+			continue
+		}
+
+		if _, ok := kept[uuid]; ok {
+			continue
+		}
+
+		inst, err := pm.createPool(uuid, node.Address)
+		if err != nil {
+			pm.logger.Error("failed to open a pool",
+				slog.String("uuid", uuid),
+				slog.String("address", node.Address),
+				slog.Any("error", err),
+			)
+
+			continue
+		}
+
+		next = append(next, inst)
+
+		pm.logger.Debug("a pool for instance was opened",
+			slog.String("uuid", uuid),
+			slog.String("address", node.Address),
+		)
+	}
+
+	pm.instances.Store(&next)
+
+	// Close blocks on checked-out connections; the topology listener cannot wait.
+	for _, inst := range current {
+		if _, ok := kept[inst.uuid]; ok {
+			continue
+		}
+
+		pm.closing.Add(1) // under pm.mu, so close() cannot miss it
+
+		go func() {
+			defer pm.closing.Done()
+
+			inst.pool.Close()
+			pm.logger.Debug("pool closed",
+				slog.String("uuid", inst.uuid),
+				slog.String("address", inst.addr),
+			)
+		}()
+	}
+
+	pm.logger.Debug("topology reconciled",
+		slog.Uint64("version", snapshot.Version),
+		slog.Int("pools", len(next)),
+	)
+
+	return len(next)
+}
+
+// createPool does not publish the pool: only reconcile decides what the
+// manager serves.
+func (pm *poolManager) createPool(uuid string, address string) (instance, error) {
+	host, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		return instance{}, fmt.Errorf("invalid address format: %q", address)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return instance{}, fmt.Errorf("parse port error [port: %s]: %w", portStr, err)
+	}
+
+	if port < 1 || port > 65535 {
+		return instance{}, fmt.Errorf("port out of range [port: %d]", port)
+	}
+
 	connCfg := pm.config.Copy()
 	connCfg.ConnConfig.Host = host
-	// Picodata provides valid port, so casting is safe
 	connCfg.ConnConfig.Port = uint16(port)
 
 	if pm.connectionPerInstance != 0 {
@@ -135,102 +218,50 @@ func (pm *poolManager) addPool(uuid string, address string) error {
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), connCfg)
 	if err != nil {
-		return fmt.Errorf("failed to create pgxpool: %w", err)
+		return instance{}, fmt.Errorf("failed to create pgxpool: %w", err)
 	}
 
-	// Add pool to the instances slice
-	pm.instances = append(pm.instances, instance{uuid: uuid, pool: pool})
-	pm.poolsMap[uuid] = len(pm.instances) - 1
-
-	pm.logger.Debug("a pool for instance was appended",
-		slog.String("uuid", uuid),
-		slog.String("address", address),
-	)
-
-	return nil
-}
-
-func (pm *poolManager) removePool(uuid string) {
-	pm.mu.Lock()
-
-	// If pool for instance doesn't exist -> return
-	index, ok := pm.poolsMap[uuid]
-	if !ok {
-		pm.mu.Unlock()
-		pm.logger.Warn("a pool for instance not found", slog.String("uuid", uuid))
-		return
-	}
-
-	// Keep reference to the pool that will be closed asynchronously
-	poolToClose := pm.instances[index].pool
-
-	// Remove entry about pool from poolsIndex
-	delete(pm.poolsMap, uuid)
-
-	lastPoolIdx := len(pm.instances) - 1
-	// If deleted pool isn't last in the slice
-	if index != lastPoolIdx {
-		// Move last pool to the position of deleted one
-		pm.instances[index] = pm.instances[lastPoolIdx]
-		// Update index of moved pool in poolsIndex
-		pm.poolsMap[pm.instances[index].uuid] = index
-	}
-	// Clear the tail before truncating: the slot stays alive beyond len until
-	// the next append overwrites it, and with it the removed pool
-	pm.instances[lastPoolIdx] = instance{}
-	// Delete pool from instances slice by truncating it
-	pm.instances = pm.instances[:lastPoolIdx]
-
-	pm.logger.Debug("a pool for instance was removed", slog.String("uuid", uuid))
-
-	// Register the pending close while still holding the lock: close() waits
-	// with the lock held, so the counter cannot rise from zero behind its back.
-	pm.closing.Add(1)
-
-	pm.mu.Unlock()
-
-	// Close the pool in background to avoid blocking the manager
-	go func() {
-		defer pm.closing.Done()
-
-		poolToClose.Close()
-		pm.logger.Debug("pool closed", slog.String("uuid", uuid))
-	}()
+	return instance{uuid: uuid, addr: address, pool: pool}, nil
 }
 
 // close closes every pool the manager owns and blocks until they are done,
-// including the ones removePool is still closing in the background.
+// including the ones reconcile is still closing in the background.
 func (pm *poolManager) close() {
 	pm.mu.Lock()
 
-	// Take the pools away from the manager before closing them, so a pick that
-	// races close finds nothing instead of a pool that is already going away.
-	instances := pm.instances
-	pm.instances = nil
-	// Emptying the index is also what makes the wait below safe: removePool
-	// registers a pending close only for an entry it found here, and it holds
-	// pm.mu from that lookup until the counter is raised, so once this returns
-	// no Add can still be on its way.
-	pm.poolsMap = map[string]int{}
+	pm.closed = true
+
+	// Empty the rotation first: a racing pick then finds nothing rather than a
+	// pool already going away, and no further Add can reach pm.closing.
+	current := *pm.instances.Load()
+	pm.instances.Store(new([]instance))
 
 	pm.mu.Unlock()
 
-	// Closing blocks until every checked-out connection is returned, and the
-	// callers holding those connections have to go through pick to return
-	// them, so the lock must be released before this loop.
-	for _, in := range instances {
-		in.pool.Close()
+	// Unlocked: the callers returning those connections go through pick. Closed
+	// together: each Close waits for its own pool, so serial would cost the sum.
+	for _, inst := range current {
+		pm.closing.Add(1)
+
+		go func() {
+			defer pm.closing.Done()
+
+			inst.pool.Close()
+		}()
 	}
 
 	pm.closing.Wait()
 }
 
+// ping fails on an empty manager: a client with no pools is not healthy.
 func (pm *poolManager) ping(ctx context.Context) error {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+	instances := *pm.instances.Load()
+	if len(instances) == 0 {
+		return ErrNoConnections
+	}
 
-	for _, in := range pm.instances {
-		if err := pingPool(ctx, in.pool); err != nil {
+	for _, inst := range instances {
+		if err := pingPool(ctx, inst.pool); err != nil {
 			return err
 		}
 	}
@@ -239,11 +270,8 @@ func (pm *poolManager) ping(ctx context.Context) error {
 }
 
 func (pm *poolManager) reset() {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, in := range pm.instances {
-		in.pool.Reset()
+	for _, inst := range *pm.instances.Load() {
+		inst.pool.Reset()
 	}
 }
 
@@ -259,25 +287,4 @@ func pingPool(ctx context.Context, p *pgxpool.Pool) error {
 	}
 
 	return nil
-}
-
-func (pm *poolManager) OnTopologyChanged(topology *tpm.ClusterTopology) {
-	for _, nodeInfo := range topology.Nodes {
-		switch nodeInfo.State {
-		case tpm.StateOnline:
-			if err := pm.addPool(nodeInfo.ID, nodeInfo.Address); err != nil {
-				pm.logger.Error("failed to add connection", slog.String("uuid", nodeInfo.ID), slog.Any("error", err))
-				continue
-			}
-		case tpm.StateOffline:
-			pm.removePool(nodeInfo.ID)
-		default:
-			pm.logger.Warn("node with unknown state is ignored",
-				slog.String("uuid", nodeInfo.ID),
-				slog.Any("state", nodeInfo.State),
-			)
-		}
-	}
-
-	pm.logger.Debug(fmt.Sprintf("discovered %d instances", len(topology.Nodes)))
 }

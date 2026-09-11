@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Source wraps DynamicSource to provide periodic topology delta updates.
+// Source wraps DynamicSource to poll the full cluster topology periodically.
 type Source struct {
 	logger   *slog.Logger
 	dynamic  *dynamic.Source

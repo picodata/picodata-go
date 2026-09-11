@@ -1,7 +1,6 @@
 package strategies_test
 
 import (
-	"math"
 	"sync"
 	"testing"
 
@@ -11,26 +10,45 @@ import (
 
 func TestRoundRobinStrategy(t *testing.T) {
 	t.Run("TestType", func(t *testing.T) {
-		strategy := strategies.NewRoundRobinStrategy()
-		assert.Equal(t, strategy.Type(), "RoundRobin")
+		assert.Equal(t, "RoundRobin", strategies.NewRoundRobinStrategy().Type())
 	})
 
 	t.Run("TestNext", func(t *testing.T) {
-		var current uint64
 		strategy := strategies.NewRoundRobinStrategy()
-		poolSize := uint64(4)
 
-		expected := []uint64{0, 1, 2, 3, 0, 1, 2, 3}
-		for _, want := range expected {
-			got := strategy.Next(&current, poolSize)
-			assert.Equal(t, got, want)
+		// The selector is raw and the start is seeded, so what holds is the step.
+		first := strategy.Next()
+		for i := uint64(1); i < 12; i++ {
+			assert.Equal(t, first+i, strategy.Next())
 		}
 	})
 
+	t.Run("TestStartsAtARandomOffset", func(t *testing.T) {
+		const tries = 32
+
+		seen := make(map[uint64]struct{}, tries)
+		for range tries {
+			seen[strategies.NewRoundRobinStrategy().Next()] = struct{}{}
+		}
+
+		assert.Greater(t, len(seen), 1, "every strategy started from the same counter")
+	})
+
+	t.Run("TestAdvanceIndependently", func(t *testing.T) {
+		a, b := strategies.NewRoundRobinStrategy(), strategies.NewRoundRobinStrategy()
+
+		first := a.Next()
+		for range 3 {
+			b.Next()
+		}
+
+		// One client's traffic must not move another client's rotation.
+		assert.Equal(t, first+1, a.Next())
+	})
+
 	t.Run("TestNextConcurrent", func(t *testing.T) {
-		var current uint64
 		strategy := strategies.NewRoundRobinStrategy()
-		poolSize := uint64(2)
+
 		const goroutines = 100
 
 		results := make(chan uint64, goroutines)
@@ -38,50 +56,29 @@ func TestRoundRobinStrategy(t *testing.T) {
 		var wg sync.WaitGroup
 		for range goroutines {
 			wg.Add(1)
+
 			go func() {
 				defer wg.Done()
-				results <- strategy.Next(&current, poolSize)
+
+				results <- strategy.Next()
 			}()
 		}
 
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
+		wg.Wait()
+		close(results)
 
-		// Collect all results
-		resultsSlice := make([]uint64, 0, goroutines)
-		for v := range results {
-			resultsSlice = append(resultsSlice, v)
+		// Every goroutine gets its own step, so the selectors come out distinct
+		// and contiguous however they interleave.
+		seen := make(map[uint64]struct{}, goroutines)
+		low, high := ^uint64(0), uint64(0)
+
+		for got := range results {
+			seen[got] = struct{}{}
+			low = min(low, got)
+			high = max(high, got)
 		}
 
-		assert.Equal(t, len(resultsSlice), goroutines)
-
-		// Count occurrences of each port
-		count1, count2 := uint64(0), uint64(0)
-		for _, port := range resultsSlice {
-			switch port {
-			case uint64(0):
-				count1++
-			case uint64(1):
-				count2++
-			}
-		}
-
-		// Verify each port is used exactly 500 times
-		expected := goroutines / poolSize
-		if count1 != expected || count2 != expected {
-			t.Errorf("Expected %d each, got %d: %d, %d: %d", expected, 0, count1, 1, count2)
-		}
-	})
-
-	t.Run("TestNextAfterMaxIndex", func(t *testing.T) {
-		current := uint64(math.MaxUint64)
-		strategy := strategies.NewRoundRobinStrategy()
-		poolSize := uint64(2)
-
-		got := strategy.Next(&current, poolSize)
-
-		assert.LessOrEqual(t, got, poolSize)
+		assert.Len(t, seen, goroutines, "a selector was handed out twice")
+		assert.Equal(t, uint64(goroutines-1), high-low)
 	})
 }

@@ -24,6 +24,10 @@ type Source struct {
 	bootstrapAddrs []string
 	// discoveredAddrs caches the addresses of online nodes found during the last successful fetch.
 	discoveredAddrs atomic.Pointer[[]string]
+
+	// Counted, not clock-based: consumers drop reports older than the last one
+	// applied, and a clock stepping backwards would freeze them.
+	version atomic.Uint64
 }
 
 // Option applies a configuration option to the Dynamic Source.
@@ -94,7 +98,7 @@ func (p *Source) Fetch(ctx context.Context) (*topology.ClusterTopology, error) {
 	p.discoveredAddrs.Store(&newAddrs)
 
 	return &topology.ClusterTopology{
-		Version: uint64(time.Now().UnixNano()),
+		Version: p.version.Add(1),
 		Nodes:   nodesMap,
 	}, nil
 }

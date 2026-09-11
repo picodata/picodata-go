@@ -21,12 +21,12 @@ import (
 // TopologyPollTimeoute setup topology update time
 const TopologyPollTimeoute = 5000 * time.Millisecond
 
-// Client allows for connection reuse.
-// It operates with slice of *pgxpool.Client, each Picodata instance have its own pool object.
+// Client routes queries across the cluster, holding one [pgxpool.Pool] per
+// Picodata instance and following the topology as instances come and go.
 type Client struct {
-	pools   *poolManager
-	router  *router
-	manager *topology.Manager
+	tpm    *topology.Manager
+	router *router
+	pm     *poolManager
 
 	stopOnce sync.Once
 }
@@ -104,13 +104,13 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		poolOpts.bootstrapHosts = append(poolOpts.bootstrapHosts, primaryAddr)
 	}
 
-	pools := newPoolManager(config, poolOpts.maxConnsPerInstance, withPoolManagerLogger(logger))
+	pm := newPoolManager(config, poolOpts.maxConnsPerInstance, withPoolManagerLogger(logger))
 
 	routerOpts := []routerOption{withRouterLogger(logger)}
 	if poolOpts.balanceStrategy != nil {
 		routerOpts = append(routerOpts, withBalanceStrategy(poolOpts.balanceStrategy))
 	}
-	router := newRouter(pools, routerOpts...)
+	router := newRouter(pm, routerOpts...)
 
 	var topologySource topology.Source
 	switch {
@@ -133,18 +133,18 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	}
 
 	// Fills the pool with the nodes of the first topology snapshot.
-	topologyManager.AddListener(pools)
+	topologyManager.AddListener(router)
 
-	if pools.PoolSize() == 0 {
+	if pm.PoolSize() == 0 {
 		topologyManager.Close()
 		// A concurrent update may have opened a pool after the size was read,
 		// and there would be no handle left to close it.
-		pools.close()
+		pm.close()
 
 		return nil, emptyPoolError(topologyManager, poolOpts.forbiddenTiers)
 	}
 
-	return &Client{pools: pools, router: router, manager: topologyManager}, nil
+	return &Client{pm: pm, router: router, tpm: topologyManager}, nil
 }
 
 // emptyPoolError explains why the initial topology produced no usable connection:
@@ -170,7 +170,7 @@ func emptyPoolError(manager *topology.Manager, forbiddenTiers []string) error {
 
 // Config returns a copy of config that was used to initialize this pool.
 func (p *Client) Config() *pgxpool.Config {
-	return p.pools.getConfig()
+	return p.pm.getConfig()
 }
 
 // Ping acquires a connection from the Pool and executes a simple SQL statement against it.
@@ -183,7 +183,7 @@ func (p *Client) Ping(ctx context.Context) error {
 	// The original *pgxpool.Ping() method sends an empty query, **--ping**, which is a comment.
 	// We need to use a custom function to send a simple **SELECT 1** query instead.
 	// Replace to original Ping method when comment support is implemented.
-	return p.pools.ping(ctx)
+	return p.pm.ping(ctx)
 }
 
 // Query acquires a connection and executes a query that returns pgx.Rows.
@@ -267,14 +267,15 @@ func (p *Client) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comm
 	return conn.Exec(ctx, sql, args...)
 }
 
-// Close closes all connections in the pool and rejects future Acquire calls. Blocks until all connections are returned
-// to pool and closed.
+// Close stops tracking the cluster and closes every pool, after which queries
+// fail with [ErrNoConnections]. Like [pgxpool.Pool.Close], it blocks until all
+// connections are returned, so a caller that leaks one blocks the shutdown.
 //
-// It is safe to close a pool multiple times.
+// It is safe to close a client multiple times.
 func (p *Client) Close() {
 	p.stopOnce.Do(func() {
-		p.manager.Close()
-		p.pools.close()
+		p.tpm.Close()
+		p.pm.close()
 	})
 }
 
@@ -286,5 +287,5 @@ func (p *Client) Close() {
 //
 // Deprecated: usefulness of a cluster-wide reset is unclear; may be removed or reworked.
 func (p *Client) Reset() {
-	p.pools.reset()
+	p.pm.reset()
 }

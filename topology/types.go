@@ -50,7 +50,11 @@ type StreamingSource interface {
 	Subscribe(ctx context.Context) (<-chan *ClusterTopology, error)
 }
 
-// Listener defines the callback interface for handling topology changes.
+// Listener is notified whenever the visible cluster changes.
+//
+// The argument is the whole cluster, not a delta: an instance missing from it
+// has left, so replace the view rather than merge into it, and make reapplying
+// the same snapshot a no-op. Never call back into the [Manager].
 type Listener interface {
 	OnTopologyChanged(*ClusterTopology)
 }
