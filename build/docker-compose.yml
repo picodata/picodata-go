@@ -1,6 +1,6 @@
 services:
   picodata-1-1:
-    image: docker.binary.picodata.io/picodata:25.2.1-distroless-amd64
+    image: docker.binary.picodata.io/picodata:26.1.6
     container_name: picodata-1-1
     hostname: picodata-1-1
     # The cluster is bootstrapped with two tiers so that the driver tests have
@@ -29,9 +29,13 @@ services:
       - "55432:5432"
 
   picodata-1-2:
-    image: docker.binary.picodata.io/picodata:25.2.1-distroless-amd64
+    image: docker.binary.picodata.io/picodata:26.1.6
     container_name: picodata-1-2
     hostname: picodata-1-2
+    command:
+      - run
+      - -c
+      - 'cluster.tier={"default":{"replication_factor":2,"bucket_count":3000,"can_vote":true},"arbiter":{"replication_factor":2,"bucket_count":3000,"can_vote":true}}'
     environment:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-1-2:3301
@@ -51,9 +55,13 @@ services:
       - "55433:5432"
 
   picodata-2-1:
-    image: docker.binary.picodata.io/picodata:25.2.1-distroless-amd64
+    image: docker.binary.picodata.io/picodata:26.1.6
     container_name: picodata-2-1
     hostname: picodata-2-1
+    command:
+      - run
+      - -c
+      - 'cluster.tier={"default":{"replication_factor":2,"bucket_count":3000,"can_vote":true},"arbiter":{"replication_factor":2,"bucket_count":3000,"can_vote":true}}'
     environment:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-2-1:3301
@@ -73,9 +81,13 @@ services:
       - "55434:5432"
 
   picodata-2-2:
-    image: docker.binary.picodata.io/picodata:25.2.1-distroless-amd64
+    image: docker.binary.picodata.io/picodata:26.1.6
     container_name: picodata-2-2
     hostname: picodata-2-2
+    command:
+      - run
+      - -c
+      - 'cluster.tier={"default":{"replication_factor":2,"bucket_count":3000,"can_vote":true},"arbiter":{"replication_factor":2,"bucket_count":3000,"can_vote":true}}'
     environment:
       PICODATA_PEER: picodata-1-1:3301
       PICODATA_LISTEN: picodata-2-2:3301

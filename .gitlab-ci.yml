@@ -1,7 +1,7 @@
 image: docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1
 
 variables:
-  PICODATA_IMAGE: docker.binary.picodata.io/picodata:25.2.1-distroless-amd64
+  PICODATA_IMAGE: docker.binary.picodata.io/picodata:26.1.6-amd64
 
 stages:
   - lint
@@ -52,6 +52,10 @@ test:
         PICODATA_INSTANCE_TIER: default
     - name: $PICODATA_IMAGE
       alias: picodata-2
+      command:
+        - run
+        - -c
+        - 'cluster.tier={"default":{"replication_factor":1,"bucket_count":3000,"can_vote":true},"arbiter":{"replication_factor":1,"bucket_count":3000,"can_vote":true}}'
       variables:
         PICODATA_LISTEN: picodata-2:3302
         PICODATA_ADVERTISE: picodata-2:3302

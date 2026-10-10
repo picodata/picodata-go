@@ -33,11 +33,11 @@ run-env: stop-env
 # stop-env keeps the named volumes: they hold the module and build caches, and
 # the cluster state lives in the bind-mounted instance directories instead.
 # Those the compose teardown leaves behind, and picodata refuses to restart an
-# instance whose tier changed, so they are wiped through a container - the files
-# belong to root.
+# instance whose tier changed. Recreate the data root through a container and
+# make it writable for the non-root user used by current picodata images.
 stop-env:
 	$(COMPOSE) down
-	$(COMPOSE) run --rm -v "$(CURDIR)/tmp:/pico" test-runner rm -rf /pico/data
+	$(COMPOSE) run --rm -v "$(CURDIR)/tmp:/pico" test-runner bash -c 'rm -rf /pico/data && mkdir -m 0777 /pico/data'
 
 # wait-env blocks until every instance accepts pgproto connections.
 wait-env:
