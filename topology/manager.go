@@ -18,7 +18,7 @@ type Manager struct {
 	current atomic.Pointer[ClusterTopology]
 	// filtered holds the view exposed to listeners: current minus the nodes
 	// rejected by filters. It shares the pointer with current when no filter
-	// is configured.
+	// is configured. Replicaset and tier metadata are kept in full.
 	filtered atomic.Pointer[ClusterTopology]
 
 	// filters are combined with a logical AND and never change after construction.
@@ -97,7 +97,7 @@ func NewTopologyManager(parent context.Context, source Source, opts ...Option) (
 	}
 
 	tpm.latestVersion = topology.Version
-	tpm.store(topology.Version, topology.Nodes)
+	tpm.store(topology)
 
 	if sp, ok := source.(StreamingSource); ok {
 		go tpm.updateLoop(sp)
@@ -169,20 +169,20 @@ func (tpm *Manager) applyAndNotify(topology *ClusterTopology) {
 
 	// The report replaces the stored view instead of merging into it, so a node
 	// it stops mentioning loses its pool rather than staying Online forever.
-	if maps.Equal(previous.Nodes, topology.Nodes) {
+	if equalTopology(previous, topology) {
 		tpm.mu.Unlock()
 		return
 	}
 
 	previousFiltered := tpm.filtered.Load()
 
-	tpm.store(topology.Version, topology.Nodes)
+	tpm.store(topology)
 
 	snapshot := tpm.filtered.Load()
 
 	// Only hidden nodes changed. Without filters these are the maps the check
 	// above already compared, so skip the walk.
-	if len(tpm.filters) != 0 && maps.Equal(previousFiltered.Nodes, snapshot.Nodes) {
+	if len(tpm.filters) != 0 && equalTopology(previousFiltered, snapshot) {
 		tpm.mu.Unlock()
 		return
 	}
@@ -196,17 +196,16 @@ func (tpm *Manager) applyAndNotify(topology *ClusterTopology) {
 	}
 }
 
-// store publishes the given cluster state as both the raw and the filtered
-// snapshot. The nodes are copied: a Source may reuse the map it hands back.
-func (tpm *Manager) store(version uint64, nodes map[string]NodeInfo) {
-	owned := make(map[string]NodeInfo, len(nodes))
-	maps.Copy(owned, nodes)
-	nodes = owned
+func equalTopology(a, b *ClusterTopology) bool {
+	return maps.Equal(a.Nodes, b.Nodes) &&
+		maps.Equal(a.Replicasets, b.Replicasets) &&
+		maps.Equal(a.Tiers, b.Tiers)
+}
 
-	full := &ClusterTopology{
-		Version: version,
-		Nodes:   nodes,
-	}
+// store publishes the given cluster state as both the raw and the filtered
+// snapshot. The maps are copied: a Source may reuse the maps it hands back.
+func (tpm *Manager) store(snapshot *ClusterTopology) {
+	full := snapshot.Clone()
 
 	tpm.current.Store(full)
 
@@ -215,22 +214,24 @@ func (tpm *Manager) store(version uint64, nodes map[string]NodeInfo) {
 		return
 	}
 
-	filteredNodes := tpm.filterNodes(nodes)
+	filteredNodes := tpm.filterNodes(full.Nodes)
 	tpm.filtered.Store(&ClusterTopology{
-		Version: version,
-		Nodes:   filteredNodes,
+		Version:     full.Version,
+		Nodes:       filteredNodes,
+		Replicasets: full.Replicasets,
+		Tiers:       full.Tiers,
 	})
 
 	tpm.logger.Debug("filters applied to topology",
-		slog.Uint64("version", version),
-		slog.Int("nodes", len(nodes)),
+		slog.Uint64("version", full.Version),
+		slog.Int("nodes", len(full.Nodes)),
 		slog.Int("visible", len(filteredNodes)),
 	)
 
 	if len(filteredNodes) == 0 && full.OnlineCount() != 0 {
 		tpm.logger.Warn("every online node is hidden by filter",
-			slog.Uint64("version", version),
-			slog.Int("nodes", len(nodes)),
+			slog.Uint64("version", full.Version),
+			slog.Int("nodes", len(full.Nodes)),
 		)
 	}
 }
