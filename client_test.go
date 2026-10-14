@@ -12,6 +12,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTopologyUpdateIntervalIgnoredWhenUpdatesDisabled(t *testing.T) {
+	config, err := ParseConfig("postgres://localhost:5432")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, interval := range []time.Duration{time.Second, TopologyPollTimeoute} {
+		for _, opts := range [][]PoolOption{
+			{WithDisableTopologyUpdate(), WithTopologyUpdateInterval(interval)},
+			{WithTopologyUpdateInterval(interval), WithDisableTopologyUpdate()},
+		} {
+			client, err := NewWithConfig(ctx, config, opts...)
+			assert.Nil(t, client)
+			assert.ErrorIs(t, err, context.Canceled)
+		}
+	}
+}
+
 func TestPoolNoConnections(t *testing.T) {
 	ctx := context.Background()
 

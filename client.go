@@ -117,7 +117,14 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	case poolOpts.topologySource != nil:
 		topologySource = poolOpts.topologySource
 	case !poolOpts.disableTopologyUpdate:
-		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, TopologyPollTimeoute, polling.WithLogger(logger))
+		interval := TopologyPollTimeoute
+		if poolOpts.topologyUpdateInterval != nil {
+			interval = *poolOpts.topologyUpdateInterval
+		}
+		if interval < time.Second {
+			return nil, fmt.Errorf("topology update interval must be at least one second")
+		}
+		topologySource = polling.New(config.ConnConfig, poolOpts.bootstrapHosts, interval, polling.WithLogger(logger))
 	default:
 		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts, dynamic.WithLogger(logger))
 	}

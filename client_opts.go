@@ -3,19 +3,21 @@ package picodata
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"git.picodata.io/core/drivers/picodata-go/strategies"
 	"git.picodata.io/core/drivers/picodata-go/topology"
 )
 
 type clientOpts struct {
-	logger                *slog.Logger
-	topologySource        topology.Source
-	balanceStrategy       strategies.BalanceStrategy
-	forbiddenTiers        []string
-	bootstrapHosts        []string
-	disableTopologyUpdate bool
-	maxConnsPerInstance   int32
+	logger                 *slog.Logger
+	topologySource         topology.Source
+	balanceStrategy        strategies.BalanceStrategy
+	forbiddenTiers         []string
+	bootstrapHosts         []string
+	disableTopologyUpdate  bool
+	topologyUpdateInterval *time.Duration
+	maxConnsPerInstance    int32
 }
 
 // PoolOption applies a single optional configuration to a pool.
@@ -58,6 +60,17 @@ func WithLogger(customLogger *slog.Logger) PoolOption {
 func WithDisableTopologyUpdate() PoolOption {
 	return func(p *clientOpts) error {
 		p.disableTopologyUpdate = true
+		return nil
+	}
+}
+
+// WithTopologyUpdateInterval sets the interval for the built-in topology poller.
+// The default is five seconds. The interval must be at least one second.
+// It is ignored when using [WithDisableTopologyUpdate].
+// It does not control a source supplied via [WithTopologySource].
+func WithTopologyUpdateInterval(interval time.Duration) PoolOption {
+	return func(p *clientOpts) error {
+		p.topologyUpdateInterval = &interval
 		return nil
 	}
 }
