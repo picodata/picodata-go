@@ -87,7 +87,7 @@ func (pm *poolManager) pick(selector uint64) *pgxpool.Pool {
 
 // reconcile brings the open pools in line with the snapshot and returns how
 // many it left open.
-func (pm *poolManager) reconcile(snapshot *tpm.ClusterTopology) int {
+func (pm *poolManager) reconcile(snapshot tpm.Snapshot) int {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -98,23 +98,23 @@ func (pm *poolManager) reconcile(snapshot *tpm.ClusterTopology) int {
 
 	current := *pm.instances.Load()
 
-	if snapshot.Version < pm.latestVersion {
+	if snapshot.Version() < pm.latestVersion {
 		pm.logger.Warn("stale topology snapshot ignored",
-			slog.Uint64("version", snapshot.Version),
+			slog.Uint64("version", snapshot.Version()),
 			slog.Uint64("latest", pm.latestVersion),
 		)
 
 		return len(current)
 	}
 
-	pm.latestVersion = snapshot.Version
+	pm.latestVersion = snapshot.Version()
 
 	next := make([]instance, 0, len(current))
 	kept := make(map[string]struct{}, len(current))
 
 	// A node that changed address is not a survivor: its pool points at the old host.
 	for _, inst := range current {
-		node, ok := snapshot.Nodes[inst.uuid]
+		node, ok := snapshot.Node(inst.uuid)
 		if !ok || node.State != tpm.StateOnline || node.Address != inst.addr {
 			continue
 		}
@@ -123,8 +123,8 @@ func (pm *poolManager) reconcile(snapshot *tpm.ClusterTopology) int {
 		kept[inst.uuid] = struct{}{}
 	}
 
-	for uuid, node := range snapshot.Nodes {
-
+	for _, node := range snapshot.Nodes() {
+		uuid := node.ID
 		switch node.State {
 		case tpm.StateOnline:
 			// Opened below.
@@ -184,7 +184,7 @@ func (pm *poolManager) reconcile(snapshot *tpm.ClusterTopology) int {
 	}
 
 	pm.logger.Debug("topology reconciled",
-		slog.Uint64("version", snapshot.Version),
+		slog.Uint64("version", snapshot.Version()),
 		slog.Int("pools", len(next)),
 	)
 

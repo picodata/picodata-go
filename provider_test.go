@@ -377,7 +377,7 @@ func TestPoolManagerReconcile(t *testing.T) {
 		require.NoError(t, err)
 
 		pm := newPoolManager(cfg, 2)
-		require.GreaterOrEqual(t, pm.reconcile(cluster), 2)
+		require.GreaterOrEqual(t, pm.reconcile(testSnapshot{cluster}), 2)
 
 		pools := rotation(pm)
 

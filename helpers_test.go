@@ -67,14 +67,44 @@ func node(uuid, address string, state ...string) tpm.NodeInfo {
 	return tpm.NodeInfo{ID: uuid, Address: address, State: nodeState}
 }
 
-// snapshot builds the full cluster view a Source would report.
-func snapshot(version uint64, nodes ...tpm.NodeInfo) *tpm.ClusterTopology {
+// testSnapshot adapts pool test fixtures to the read-only snapshot interface.
+type testSnapshot struct {
+	*tpm.ClusterTopology
+}
+
+func (s testSnapshot) Version() uint64 { return s.ClusterTopology.Version }
+
+func (s testSnapshot) Node(id string) (tpm.NodeInfo, bool) {
+	node, ok := s.ClusterTopology.Nodes[id]
+	return node, ok
+}
+
+func (s testSnapshot) Nodes() []tpm.NodeInfo {
+	nodes := make([]tpm.NodeInfo, 0, len(s.ClusterTopology.Nodes))
+	for _, node := range s.ClusterTopology.Nodes {
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
+func (s testSnapshot) Replicaset(id string) (tpm.ReplicasetInfo, bool) {
+	replicaset, ok := s.Replicasets[id]
+	return replicaset, ok
+}
+
+func (s testSnapshot) BucketCount(tier string) (uint64, bool) {
+	count, ok := s.BucketCounts[tier]
+	return count, ok
+}
+
+// snapshot builds a read-only cluster view for pool tests.
+func snapshot(version uint64, nodes ...tpm.NodeInfo) testSnapshot {
 	byID := make(map[string]tpm.NodeInfo, len(nodes))
 	for _, n := range nodes {
 		byID[n.ID] = n
 	}
 
-	return &tpm.ClusterTopology{Version: version, Nodes: byID}
+	return testSnapshot{&tpm.ClusterTopology{Version: version, Nodes: byID}}
 }
 
 // rotation returns the pools the manager serves, in the order strategies index.

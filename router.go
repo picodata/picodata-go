@@ -59,11 +59,11 @@ func (r *router) nextConnection() *pgxpool.Pool {
 }
 
 // OnTopologyChanged implements [tpm.Listener].
-func (r *router) OnTopologyChanged(snapshot *tpm.ClusterTopology) {
+func (r *router) OnTopologyChanged(snapshot tpm.Snapshot) {
 	pools := r.pm.reconcile(snapshot)
 
 	r.logger.Debug("routing updated",
-		slog.Uint64("version", snapshot.Version),
+		slog.Uint64("version", snapshot.Version()),
 		slog.Int("pools", pools),
 	)
 }

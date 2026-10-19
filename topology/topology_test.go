@@ -66,9 +66,9 @@ func newMockListener() *mockListener {
 	}
 }
 
-func (l *mockListener) OnTopologyChanged(topology *topology.ClusterTopology) {
+func (l *mockListener) OnTopologyChanged(snapshot topology.Snapshot) {
 	l.mu.Lock()
-	l.received = append(l.received, topology)
+	l.received = append(l.received, snapshot.Clone())
 	l.mu.Unlock()
 
 	// Non-blocking write to signal that notification was received.
@@ -361,7 +361,6 @@ func TestTopologyManager_Notifications(t *testing.T) {
 
 		received := awaitTopology(t, ctx, listener)
 		assert.NotContains(t, received.Nodes, "node-2")
-		assert.NotContains(t, manager.GetTopology().Nodes, "node-2")
 	})
 
 	t.Run("IgnoresAnEmptyReport", func(t *testing.T) {
@@ -390,7 +389,7 @@ func TestTopologyManager_Notifications(t *testing.T) {
 		awaitVersion(t, ctx, listener, 3)
 		assert.Equal(t, []uint64{1, 3}, listener.versions(),
 			"the empty report must not reach the listeners")
-		assert.Len(t, manager.GetTopology().Nodes, 1)
+		assert.Len(t, listener.getTopology().Nodes, 1)
 	})
 
 	t.Run("IgnoresAStaleReport", func(t *testing.T) {
@@ -427,7 +426,7 @@ func TestTopologyManager_Notifications(t *testing.T) {
 
 		awaitVersion(t, ctx, listener, 13)
 		assert.Equal(t, []uint64{11, 12, 13}, listener.versions())
-		assert.Equal(t, uint64(13), manager.GetTopology().Version)
+		assert.Equal(t, uint64(13), listener.getTopology().Version)
 	})
 
 	t.Run("RemembersVersionsItDidNotStore", func(t *testing.T) {
@@ -562,9 +561,9 @@ func testMetadataCluster() *topology.ClusterTopology {
 		"rs-1": {ID: "rs-1", Tier: "default", CurrentMasterID: "node-1"},
 		"rs-2": {ID: "rs-2", Tier: "other"},
 	}
-	report.Tiers = map[string]topology.TierInfo{
-		"default": {Name: "default", BucketCount: 3000},
-		"other":   {Name: "other", BucketCount: 3000},
+	report.BucketCounts = map[string]uint64{
+		"default": 3000,
+		"other":   3000,
 	}
 	return report
 }
@@ -593,19 +592,17 @@ func TestTopologyManager_MetadataUpdates(t *testing.T) {
 			delete(report.Replicasets, "rs-2")
 		}},
 		{"BucketCountChanges", func(report *topology.ClusterTopology) {
-			tier := report.Tiers["default"]
-			tier.BucketCount = 4000
-			report.Tiers["default"] = tier
+			report.BucketCounts["default"] = 4000
 		}},
 		{"TierAppears", func(report *topology.ClusterTopology) {
-			report.Tiers["new"] = topology.TierInfo{Name: "new", BucketCount: 4000}
+			report.BucketCounts["new"] = 4000
 		}},
 		{"TierDisappears", func(report *topology.ClusterTopology) {
-			delete(report.Tiers, "other")
+			delete(report.BucketCounts, "other")
 		}},
 		{"MetadataBecomesUnavailable", func(report *topology.ClusterTopology) {
 			report.Replicasets = nil
-			report.Tiers = nil
+			report.BucketCounts = nil
 		}},
 	}
 	for _, tt := range tests {
@@ -658,66 +655,12 @@ func TestTopologyManager_UnchangedMetadata(t *testing.T) {
 	source.updates <- stale
 	next := initial.Clone()
 	next.Version = 3
-	tier := next.Tiers["default"]
-	tier.BucketCount++
-	next.Tiers["default"] = tier
+	next.BucketCounts["default"]++
 	source.updates <- next
 
 	assert.Equal(t, next, awaitVersion(t, ctx, listener, 3))
 	assert.Equal(t, []uint64{1, 3}, listener.versions())
 	assert.Equal(t, initial, first, "publishing an update must not change an older snapshot")
-}
-
-func TestTopologyManager_SnapshotIsDetachedFromTheSource(t *testing.T) {
-	for _, streaming := range []bool{false, true} {
-		for _, filtered := range []bool{false, true} {
-			t.Run(fmt.Sprintf("Streaming=%t/Filtered=%t", streaming, filtered), func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-
-				report := testMetadataCluster()
-				var opts []topology.Option
-				if filtered {
-					node := report.Nodes["node-2"]
-					node.Tier = "other"
-					node.ReplicasetID = "rs-2"
-					report.Nodes["node-2"] = node
-					opts = append(opts, topology.WithForbiddenTiers("other"))
-				}
-				source := newControlledSource(report)
-				manager, err := topology.NewTopologyManager(ctx, source, opts...)
-				require.NoError(t, err)
-				defer manager.Close()
-				listener := newMockListener()
-				manager.AddListener(listener)
-				received := awaitTopology(t, ctx, listener)
-				if streaming {
-					report = report.Clone()
-					report.Version = 2
-					tier := report.Tiers["default"]
-					tier.BucketCount++
-					report.Tiers["default"] = tier
-					source.updates <- report
-					received = awaitVersion(t, ctx, listener, 2)
-				}
-				expected := report.Clone()
-				expectedVisible := received.Clone()
-
-				// Delivery has completed, so the source mutation cannot race with copying.
-				report.Version = 99
-				delete(report.Nodes, "node-1")
-				report.Nodes["extra"] = testNode("extra", "default", topology.StateOnline)
-				report.Replicasets["rs-1"] = topology.ReplicasetInfo{}
-				delete(report.Replicasets, "rs-2")
-				report.Tiers["default"] = topology.TierInfo{}
-				delete(report.Tiers, "other")
-
-				assert.Equal(t, expected, manager.GetTopology())
-				assert.Equal(t, expectedVisible, manager.GetFilteredTopology())
-				assert.Equal(t, expectedVisible, received)
-			})
-		}
-	}
 }
 
 func TestClusterTopologyOnlineCount(t *testing.T) {
@@ -739,11 +682,13 @@ func TestTopologyManager_Lifecycle(t *testing.T) {
 
 		// A nil parent must fall back to Background rather than panic on
 		// context.WithCancel.
-		manager, err := topology.NewTopologyManager(nil, source) //nolint:staticcheck // nil is the case under test
+		manager, err := topology.NewTopologyManager(nil, source) //nolint:staticcheck // nil parent fallback is the case under test
 		require.NoError(t, err)
 		defer manager.Close()
 
-		assert.Len(t, manager.GetTopology().Nodes, 1)
+		listener := newMockListener()
+		manager.AddListener(listener)
+		assert.Len(t, listener.getTopology().Nodes, 1)
 	})
 
 	t.Run("RejectsASourceThatReturnsNoTopology", func(t *testing.T) {
@@ -823,11 +768,6 @@ func TestTopologyManager_Filters(t *testing.T) {
 		received := awaitTopology(t, ctx, listener)
 		require.Len(t, received.Nodes, 2)
 		assert.NotContains(t, received.Nodes, "node-3")
-
-		// The manager stays an honest mirror of the cluster: only the view
-		// handed to listeners is filtered.
-		assert.Len(t, manager.GetTopology().Nodes, 3)
-		assert.Len(t, manager.GetFilteredTopology().Nodes, 2)
 	})
 
 	t.Run("HiddenNodeChangesDoNotWakeListeners", func(t *testing.T) {
@@ -867,11 +807,6 @@ func TestTopologyManager_Filters(t *testing.T) {
 			"the hidden-only change must not reach the listeners")
 		require.Len(t, received.Nodes, 1)
 		assert.Equal(t, topology.StateOffline, received.Nodes["node-1"].State)
-
-		// The hidden node keeps being tracked, so the driver still notices when
-		// an allowed node comes back on a node it does not route to.
-		assert.Len(t, manager.GetTopology().Nodes, 2)
-		assert.Equal(t, topology.StateOffline, manager.GetTopology().Nodes["node-2"].State)
 	})
 
 	t.Run("CombinesFiltersWithAnd", func(t *testing.T) {
@@ -901,31 +836,15 @@ func TestTopologyManager_Filters(t *testing.T) {
 		assert.Contains(t, received.Nodes, "node-1")
 	})
 
-	t.Run("WithoutFiltersSnapshotsAreShared", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		source := newControlledSource(testCluster(1,
-			testNode("node-1", "default", topology.StateOnline),
-		))
-
-		manager, err := topology.NewTopologyManager(ctx, source)
-		require.NoError(t, err)
-		defer manager.Close()
-
-		// No filter configured: nothing is copied, both views are the same snapshot.
-		assert.Same(t, manager.GetTopology(), manager.GetFilteredTopology())
-	})
-
-	t.Run("MetadataIsUnfiltered", func(t *testing.T) {
+	t.Run("FiltersNodesReplicasetsAndTiersTogether", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		initial := testMetadataCluster()
-		hidden := initial.Nodes["node-2"]
-		hidden.Tier = "other"
-		hidden.ReplicasetID = "rs-2"
-		initial.Nodes["node-2"] = hidden
+		node := initial.Nodes["node-2"]
+		node.Tier = "other"
+		node.ReplicasetID = "rs-2"
+		initial.Nodes["node-2"] = node
 		initial.Replicasets["rs-2"] = topology.ReplicasetInfo{ID: "rs-2", Tier: "other", CurrentMasterID: "node-2"}
 		source := newControlledSource(initial)
 		manager, err := topology.NewTopologyManager(ctx, source, topology.WithForbiddenTiers("other"))
@@ -937,9 +856,12 @@ func TestTopologyManager_Filters(t *testing.T) {
 		visible := awaitTopology(t, ctx, listener)
 		assert.Contains(t, visible.Nodes, "node-1")
 		assert.NotContains(t, visible.Nodes, "node-2")
-		assert.Equal(t, initial.Replicasets, visible.Replicasets)
-		assert.Equal(t, initial.Tiers, visible.Tiers)
-		assert.Equal(t, "node-2", visible.Replicasets["rs-2"].CurrentMasterID)
+		assert.Equal(t, map[string]topology.ReplicasetInfo{
+			"rs-1": initial.Replicasets["rs-1"],
+		}, visible.Replicasets)
+		assert.Equal(t, map[string]uint64{
+			"default": initial.BucketCounts["default"],
+		}, visible.BucketCounts)
 
 		next := initial.Clone()
 		next.Version = 2
@@ -948,11 +870,54 @@ func TestTopologyManager_Filters(t *testing.T) {
 		next.Replicasets["rs-2"] = rs
 		source.updates <- next
 
-		updated := awaitVersion(t, ctx, listener, 2)
+		// Changing excluded metadata must not notify listeners. The following
+		// visible update proves that version 2 was processed and skipped.
+		next = next.Clone()
+		next.Version = 3
+		next.BucketCounts["default"]++
+		source.updates <- next
+
+		updated := awaitVersion(t, ctx, listener, 3)
 		assert.Equal(t, visible.Nodes, updated.Nodes)
-		assert.Empty(t, updated.Replicasets["rs-2"].CurrentMasterID)
+		assert.Equal(t, visible.Replicasets, updated.Replicasets)
+		assert.Equal(t, map[string]uint64{"default": next.BucketCounts["default"]}, updated.BucketCounts)
+		assert.Equal(t, []uint64{1, 3}, listener.versions())
+
+		// Once the node belongs to an allowed tier, its replicaset metadata
+		// must appear in the filtered topology again.
+		next = next.Clone()
+		next.Version = 4
+		node = next.Nodes["node-2"]
+		node.Tier = "default"
+		next.Nodes["node-2"] = node
+		rs = next.Replicasets["rs-2"]
+		rs.Tier = "default"
+		next.Replicasets["rs-2"] = rs
+		source.updates <- next
+
+		updated = awaitVersion(t, ctx, listener, 4)
+		assert.Equal(t, next.Nodes, updated.Nodes)
 		assert.Equal(t, next.Replicasets, updated.Replicasets)
-		assert.Equal(t, []uint64{1, 2}, listener.versions())
+		assert.Equal(t, map[string]uint64{"default": next.BucketCounts["default"]}, updated.BucketCounts)
+	})
+
+	t.Run("AllNodesFilteredOutRemovesMetadata", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		initial := testMetadataCluster()
+		source := newControlledSource(initial)
+		manager, err := topology.NewTopologyManager(ctx, source, topology.WithForbiddenTiers("default", "other"))
+		require.NoError(t, err)
+		defer manager.Close()
+
+		listener := newMockListener()
+		manager.AddListener(listener)
+		visible := awaitTopology(t, ctx, listener)
+		assert.Equal(t, initial.Version, visible.Version)
+		assert.Empty(t, visible.Nodes)
+		assert.Empty(t, visible.Replicasets)
+		assert.Empty(t, visible.BucketCounts)
 	})
 
 	t.Run("UnavailableMetadataStaysNil", func(t *testing.T) {
@@ -966,6 +931,6 @@ func TestTopologyManager_Filters(t *testing.T) {
 		visible := listener.getTopology()
 		require.Len(t, visible.Nodes, 1)
 		assert.Nil(t, visible.Replicasets)
-		assert.Nil(t, visible.Tiers)
+		assert.Nil(t, visible.BucketCounts)
 	})
 }

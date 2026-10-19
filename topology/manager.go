@@ -10,16 +10,22 @@ import (
 	"sync/atomic"
 )
 
+// ErrNoOnlineNodes means the topology contains no online nodes.
+var ErrNoOnlineNodes = errors.New("no online nodes discovered")
+
+// ErrNoAllowedOnlineNodes means all online nodes were excluded by filters.
+var ErrNoAllowedOnlineNodes = errors.New("no online nodes available after applying topology filters")
+
 // Manager coordinates topology updates and dispatches them to listeners.
 type Manager struct {
 	logger *slog.Logger
 
 	// current holds the cluster as reported by the source, with no filters applied.
-	current atomic.Pointer[ClusterTopology]
-	// filtered holds the view exposed to listeners: current minus the nodes
-	// rejected by filters. It shares the pointer with current when no filter
-	// is configured. Replicaset and tier metadata are kept in full.
-	filtered atomic.Pointer[ClusterTopology]
+	current atomic.Pointer[clusterSnapshot]
+	// filtered holds the view exposed to listeners: allowed nodes and their
+	// replicaset and tier metadata. It shares the pointer with current when
+	// no filter is configured.
+	filtered atomic.Pointer[clusterSnapshot]
 
 	// filters are combined with a logical AND and never change after construction.
 	filters []Filter
@@ -47,7 +53,8 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// WithForbiddenTiers hides nodes belonging to the given tiers from topology listeners.
+// WithForbiddenTiers excludes the given tiers, their replicasets and nodes
+// from topology listeners.
 //
 // Filters are combined with a logical AND: a node reaches the listeners only if
 // every filter allows it. Filtering never affects the [Source], so the driver
@@ -169,7 +176,7 @@ func (tpm *Manager) applyAndNotify(topology *ClusterTopology) {
 
 	// The report replaces the stored view instead of merging into it, so a node
 	// it stops mentioning loses its pool rather than staying Online forever.
-	if equalTopology(previous, topology) {
+	if equalTopology(previous.topology, topology) {
 		tpm.mu.Unlock()
 		return
 	}
@@ -180,9 +187,9 @@ func (tpm *Manager) applyAndNotify(topology *ClusterTopology) {
 
 	snapshot := tpm.filtered.Load()
 
-	// Only hidden nodes changed. Without filters these are the maps the check
+	// Only excluded topology data changed. Without filters these are the maps the check
 	// above already compared, so skip the walk.
-	if len(tpm.filters) != 0 && equalTopology(previousFiltered, snapshot) {
+	if len(tpm.filters) != 0 && equalTopology(previousFiltered.topology, snapshot.topology) {
 		tpm.mu.Unlock()
 		return
 	}
@@ -199,13 +206,13 @@ func (tpm *Manager) applyAndNotify(topology *ClusterTopology) {
 func equalTopology(a, b *ClusterTopology) bool {
 	return maps.Equal(a.Nodes, b.Nodes) &&
 		maps.Equal(a.Replicasets, b.Replicasets) &&
-		maps.Equal(a.Tiers, b.Tiers)
+		maps.Equal(a.BucketCounts, b.BucketCounts)
 }
 
 // store publishes the given cluster state as both the raw and the filtered
 // snapshot. The maps are copied: a Source may reuse the maps it hands back.
 func (tpm *Manager) store(snapshot *ClusterTopology) {
-	full := snapshot.Clone()
+	full := newClusterSnapshot(snapshot)
 
 	tpm.current.Store(full)
 
@@ -214,39 +221,53 @@ func (tpm *Manager) store(snapshot *ClusterTopology) {
 		return
 	}
 
-	filteredNodes := tpm.filterNodes(full.Nodes)
-	tpm.filtered.Store(&ClusterTopology{
-		Version:     full.Version,
-		Nodes:       filteredNodes,
-		Replicasets: full.Replicasets,
-		Tiers:       full.Tiers,
-	})
+	filtered := tpm.filterTopology(full)
+	tpm.filtered.Store(filtered)
 
 	tpm.logger.Debug("filters applied to topology",
-		slog.Uint64("version", full.Version),
-		slog.Int("nodes", len(full.Nodes)),
-		slog.Int("visible", len(filteredNodes)),
+		slog.Uint64("version", full.Version()),
+		slog.Int("nodes", len(full.topology.Nodes)),
+		slog.Int("visible", len(filtered.topology.Nodes)),
 	)
 
-	if len(filteredNodes) == 0 && full.OnlineCount() != 0 {
+	if len(filtered.topology.Nodes) == 0 && full.OnlineCount() != 0 {
 		tpm.logger.Warn("every online node is hidden by filter",
-			slog.Uint64("version", full.Version),
-			slog.Int("nodes", len(full.Nodes)),
+			slog.Uint64("version", full.Version()),
+			slog.Int("nodes", len(full.topology.Nodes)),
 		)
 	}
 }
 
-// filterNodes returns the subset of nodes the filters allow. Only called when
-// there is at least one filter: store publishes the unfiltered map directly.
-func (tpm *Manager) filterNodes(nodes map[string]NodeInfo) map[string]NodeInfo {
-	filtered := make(map[string]NodeInfo, len(nodes))
-	for id, node := range nodes {
-		if tpm.allow(node) {
-			filtered[id] = node
+// filterTopology returns allowed nodes and their replicaset and tier metadata.
+// Only called when at least one filter is configured.
+func (tpm *Manager) filterTopology(full *clusterSnapshot) *clusterSnapshot {
+	snapshot := full.topology
+	filtered := &ClusterTopology{
+		Version: snapshot.Version,
+		Nodes:   make(map[string]NodeInfo, len(snapshot.Nodes)),
+	}
+	if snapshot.Replicasets != nil {
+		filtered.Replicasets = make(map[string]ReplicasetInfo, len(snapshot.Replicasets))
+	}
+	if snapshot.BucketCounts != nil {
+		filtered.BucketCounts = make(map[string]uint64, len(snapshot.BucketCounts))
+	}
+
+	for id, node := range snapshot.Nodes {
+		if !tpm.allow(node) {
+			continue
+		}
+
+		filtered.Nodes[id] = node
+		if replicaset, ok := snapshot.Replicasets[node.ReplicasetID]; ok {
+			filtered.Replicasets[node.ReplicasetID] = replicaset
+		}
+		if bucketCount, ok := snapshot.BucketCounts[node.Tier]; ok {
+			filtered.BucketCounts[node.Tier] = bucketCount
 		}
 	}
 
-	return filtered
+	return &clusterSnapshot{topology: filtered}
 }
 
 // allow reports whether every configured filter accepts the node.
@@ -273,19 +294,21 @@ func (tpm *Manager) AddListener(listener Listener) {
 	listener.OnTopologyChanged(tpm.filtered.Load())
 }
 
-// GetTopology returns the most recent cluster topology state, as reported by the
-// source: filters are not applied. See [Manager.GetFilteredTopology] for the view
-// the listeners receive.
-// Note: Returns a shared pointer. Mutation of the underlying map fields by external consumers is forbidden.
-func (tpm *Manager) GetTopology() *ClusterTopology {
-	return tpm.current.Load()
-}
+// CheckOnlineNodes returns the number of online nodes allowed by the configured
+// filters, or ErrNoOnlineNodes or ErrNoAllowedOnlineNodes if none are available.
+// It does not attempt to open connections.
+func (tpm *Manager) CheckOnlineNodes() (int, error) {
+	tpm.mu.Lock()
+	defer tpm.mu.Unlock()
 
-// GetFilteredTopology returns the most recent cluster topology state with the
-// configured filters applied, that is the same view the listeners receive.
-// Note: Returns a shared pointer. Mutation of the underlying map fields by external consumers is forbidden.
-func (tpm *Manager) GetFilteredTopology() *ClusterTopology {
-	return tpm.filtered.Load()
+	if online := tpm.filtered.Load().OnlineCount(); online != 0 {
+		return online, nil
+	}
+	if tpm.current.Load().OnlineCount() == 0 {
+		return 0, ErrNoOnlineNodes
+	}
+
+	return 0, ErrNoAllowedOnlineNodes
 }
 
 // Close stops the background update loop and releases allocated resources.

@@ -6,11 +6,57 @@ import (
 	"time"
 
 	"git.picodata.io/core/drivers/picodata-go/internal/testenv"
+	"git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type topologySourceFunc func(context.Context) (*topology.ClusterTopology, error)
+
+func (f topologySourceFunc) Fetch(ctx context.Context) (*topology.ClusterTopology, error) {
+	return f(ctx)
+}
+
+func TestClientEmptyPoolErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		nodes     []topology.NodeInfo
+		forbidden []string
+		wantError string
+	}{
+		{
+			"NoOnlineNodes",
+			[]topology.NodeInfo{node("node-1", "localhost:5432", topology.StateOffline)},
+			nil,
+			"no online nodes discovered",
+		},
+		{"AllOnlineNodesFiltered", []topology.NodeInfo{
+			{ID: "node-1", Tier: "arbiter", Address: "localhost:5432", State: topology.StateOnline},
+			{ID: "node-2", Tier: "default", Address: "localhost:5432", State: topology.StateOffline},
+		}, []string{"readonly", "arbiter"}, "no online nodes available after applying forbidden tiers filter: readonly,arbiter"},
+		{"PoolCreationFailed", []topology.NodeInfo{
+			node("node-1", "invalid-address-1"),
+			node("node-2", "invalid-address-2"),
+			{ID: "node-3", Tier: "arbiter", Address: "localhost:5432", State: topology.StateOnline},
+			node("node-4", "localhost:5432", topology.StateOffline),
+		}, []string{"arbiter"}, "failed to open a pool for any of 2 online nodes, see the log for per-node errors"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := ParseConfig("postgres://localhost:5432")
+			require.NoError(t, err)
+			source := topologySourceFunc(func(context.Context) (*topology.ClusterTopology, error) {
+				return snapshot(1, tt.nodes...).Clone(), nil
+			})
+			client, err := NewWithConfig(context.Background(), config,
+				WithTopologySource(source), WithForbiddenTiers(tt.forbidden...))
+
+			assert.Nil(t, client)
+			assert.EqualError(t, err, tt.wantError)
+		})
+	}
+}
 
 func TestTopologyUpdateIntervalIgnoredWhenUpdatesDisabled(t *testing.T) {
 	config, err := ParseConfig("postgres://localhost:5432")
@@ -18,15 +64,26 @@ func TestTopologyUpdateIntervalIgnoredWhenUpdatesDisabled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	for _, interval := range []time.Duration{time.Second, TopologyPollTimeoute} {
-		for _, opts := range [][]PoolOption{
-			{WithDisableTopologyUpdate(), WithTopologyUpdateInterval(interval)},
-			{WithTopologyUpdateInterval(interval), WithDisableTopologyUpdate()},
-		} {
-			client, err := NewWithConfig(ctx, config, opts...)
+	// This interval would fail validation if polling were enabled.
+	interval := time.Second - time.Nanosecond
+	for _, tt := range []struct {
+		name     string
+		opts     []PoolOption
+		disabled bool
+	}{
+		{"UpdatesEnabled", []PoolOption{WithTopologyUpdateInterval(interval)}, false},
+		{"DisableFirst", []PoolOption{WithDisableTopologyUpdate(), WithTopologyUpdateInterval(interval)}, true},
+		{"DisableLast", []PoolOption{WithTopologyUpdateInterval(interval), WithDisableTopologyUpdate()}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewWithConfig(ctx, config, tt.opts...)
 			assert.Nil(t, client)
-			assert.ErrorIs(t, err, context.Canceled)
-		}
+			if tt.disabled {
+				assert.ErrorIs(t, err, context.Canceled)
+			} else {
+				assert.EqualError(t, err, "topology update interval must be at least one second")
+			}
+		})
 	}
 }
 
@@ -86,14 +143,14 @@ func TestClientForbiddenTiers(t *testing.T) {
 
 	// The pool is built from the first topology snapshot, so both tiers have to
 	// be online before any of this can be asserted on.
-	testenv.WaitReady(t, ctx, 2, 2)
+	cluster := testenv.WaitReady(t, ctx, 2, 2)
 
 	t.Run("WithoutFilterEveryTierIsPooled", func(t *testing.T) {
 		client, err := New(ctx, testenv.URI())
 		require.NoError(t, err)
 		defer client.Close()
 
-		arbiters := tierNodeIDs(t, client.tpm.GetTopology(), "arbiter")
+		arbiters := tierNodeIDs(t, cluster, "arbiter")
 		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
 
 		assert.Subset(t, uuidsOf(*client.pm.instances.Load()), arbiters)
@@ -104,12 +161,10 @@ func TestClientForbiddenTiers(t *testing.T) {
 		require.NoError(t, err)
 		defer client.Close()
 
-		cluster := client.tpm.GetTopology()
 		arbiters := tierNodeIDs(t, cluster, "arbiter")
 		allowed := tierNodeIDs(t, cluster, "default")
 
-		// The raw topology keeps tracking the hidden nodes, so the driver still
-		// notices when an allowed node comes back.
+		// The test cluster contains both tiers, but the pool must exclude arbiters.
 		require.NotEmpty(t, arbiters, "the test cluster must expose an arbiter tier")
 		require.NotEmpty(t, allowed)
 

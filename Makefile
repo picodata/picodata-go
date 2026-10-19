@@ -21,11 +21,11 @@ test: run-env wait-env
 # test-all expects a reachable cluster: it is what runs inside the test runner
 # and in CI, where the cluster is provided by the job services.
 test-all:
-	go test -v ./...
+	go test -race -v ./...
 
 # test-unit runs the tests that need no cluster, so it works on the host as is.
 test-unit:
-	go test -v -short ./...
+	go test -race -v -short ./...
 
 # GOFLAGS passes -short to coverage and mutant tests, skipping cluster tests.
 test-mutation:

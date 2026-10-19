@@ -18,8 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TopologyPollTimeoute setup topology update time
-const TopologyPollTimeoute = 5000 * time.Millisecond
+// TopologyPollTimeout setup topology update time
+const TopologyPollTimeout = 5000 * time.Millisecond
 
 // Client routes queries across the cluster, holding one [pgxpool.Pool] per
 // Picodata instance and following the topology as instances come and go.
@@ -117,7 +117,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	case poolOpts.topologySource != nil:
 		topologySource = poolOpts.topologySource
 	case !poolOpts.disableTopologyUpdate:
-		interval := TopologyPollTimeoute
+		interval := TopologyPollTimeout
 		if poolOpts.topologyUpdateInterval != nil {
 			interval = *poolOpts.topologyUpdateInterval
 		}
@@ -142,37 +142,32 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 	// Fills the pool with the nodes of the first topology snapshot.
 	topologyManager.AddListener(router)
 
+	// A pool can be empty because no nodes are online, all online nodes were
+	// filtered out, or every allowed node failed to open a pool.
 	if pm.PoolSize() == 0 {
 		topologyManager.Close()
 		// A concurrent update may have opened a pool after the size was read,
 		// and there would be no handle left to close it.
 		pm.close()
 
-		return nil, emptyPoolError(topologyManager, poolOpts.forbiddenTiers)
-	}
+		onlineCount, err := topologyManager.CheckOnlineNodes()
+		if errors.Is(err, topology.ErrNoAllowedOnlineNodes) {
+			return nil, fmt.Errorf(
+				"no online nodes available after applying forbidden tiers filter: %s",
+				strings.Join(poolOpts.forbiddenTiers, ","),
+			)
+		}
+		if err != nil {
+			return nil, err
+		}
 
-	return &Client{pm: pm, router: router, tpm: topologyManager}, nil
-}
-
-// emptyPoolError explains why the initial topology produced no usable connection:
-// the cluster reported no online node at all, the filters hid every one of them,
-// or every allowed node failed to open a pool.
-func emptyPoolError(manager *topology.Manager, forbiddenTiers []string) error {
-	if online := manager.GetFilteredTopology().OnlineCount(); online != 0 {
 		// The per-node reason is logged where it happens: carrying it all the
 		// way here would mean keeping it on the pool manager for the lifetime
 		// of the client to serve a single message.
-		return fmt.Errorf("failed to open a pool for any of %d online nodes, see the log for per-node errors", online)
+		return nil, fmt.Errorf("failed to open a pool for any of %d online nodes, see the log for per-node errors", onlineCount)
 	}
 
-	if len(forbiddenTiers) != 0 && manager.GetTopology().OnlineCount() != 0 {
-		return fmt.Errorf(
-			"no online nodes available after applying forbidden tiers filter: %s",
-			strings.Join(forbiddenTiers, ","),
-		)
-	}
-
-	return errors.New("no online nodes discovered")
+	return &Client{pm: pm, router: router, tpm: topologyManager}, nil
 }
 
 // Config returns a copy of config that was used to initialize this pool.
