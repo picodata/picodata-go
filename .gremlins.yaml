@@ -1,0 +1,7 @@
+unleash:
+  integration: false
+  workers: 2
+  timeout-coefficient: 5
+  exclude-files:
+    - '(^|/)internal/testenv/'
+    - '(^|/)examples/'

@@ -1,4 +1,4 @@
-.PHONY: lint fmt test test-all test-unit clean all run-env stop-env wait-env image push_image
+.PHONY: lint fmt test test-all test-unit test-mutation clean all run-env stop-env wait-env image push_image
 
 COMPOSE = docker compose -f build/docker-compose.yml
 RUNNER_IMAGE = docker-picodata.binary.picodata.io/picodata-go/go-runner:0.1.1
@@ -26,6 +26,11 @@ test-all:
 # test-unit runs the tests that need no cluster, so it works on the host as is.
 test-unit:
 	go test -v -short ./...
+
+# GOFLAGS passes -short to coverage and mutant tests, skipping cluster tests.
+test-mutation:
+	@which gremlins > /dev/null 2>&1 || (echo "gremlins not installed. Run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0" && exit 1)
+	GOFLAGS="$(GOFLAGS) -short" gremlins unleash ./topology
 
 run-env: stop-env
 	$(COMPOSE) up -d
