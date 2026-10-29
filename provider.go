@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"git.picodata.io/core/drivers/picodata-go/internal/filter"
 	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +25,7 @@ type poolManager struct {
 	logger                *slog.Logger
 	config                *pgxpool.Config
 	connectionPerInstance int32
+	filters               []filter.Filter // combined with logical AND; fixed at construction
 
 	// Rotation the balance strategies index into, replaced wholesale.
 	instances atomic.Pointer[[]instance]
@@ -31,7 +33,7 @@ type poolManager struct {
 	// Departed pools still draining.
 	closing sync.WaitGroup
 
-	mu            sync.Mutex // serializes reconcile and close; guards the fields below
+	mu            sync.Mutex // guards pool publication and the fields below
 	latestVersion uint64
 	closed        bool
 }
@@ -41,6 +43,12 @@ type poolManagerOption func(*poolManager)
 func withPoolManagerLogger(l *slog.Logger) poolManagerOption {
 	return func(pm *poolManager) {
 		pm.logger = l.With(slog.String("component", "pool_manager"))
+	}
+}
+
+func withPoolManagerFilters(filters ...filter.Filter) poolManagerOption {
+	return func(pm *poolManager) {
+		pm.filters = append(pm.filters, filters...)
 	}
 }
 
@@ -85,9 +93,42 @@ func (pm *poolManager) pick(selector uint64) *pgxpool.Pool {
 	return pools[index].pool
 }
 
-// reconcile brings the open pools in line with the snapshot and returns how
-// many it left open.
+// allowNode reports whether every configured filter accepts the node.
+func allowNode(node tpm.NodeInfo, filters []filter.Filter) bool {
+	for _, filter := range filters {
+		if !filter.Allow(node) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// reconcile brings the open pools in line with the snapshot and configured
+// filters, and returns how many it left open.
 func (pm *poolManager) reconcile(snapshot tpm.Snapshot) int {
+	version := snapshot.Version()
+	nodes := snapshot.Nodes()
+
+	// Evaluate configured filters outside the lock, once per candidate node.
+	nodesByID := make(map[string]tpm.NodeInfo, len(nodes))
+	onlineCount := 0
+	allowedOnline := false
+	for _, node := range nodes {
+		if node.State == tpm.StateOnline {
+			onlineCount++
+		}
+
+		if !allowNode(node, pm.filters) {
+			continue
+		}
+
+		nodesByID[node.ID] = node
+		if node.State == tpm.StateOnline {
+			allowedOnline = true
+		}
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -98,23 +139,30 @@ func (pm *poolManager) reconcile(snapshot tpm.Snapshot) int {
 
 	current := *pm.instances.Load()
 
-	if snapshot.Version() < pm.latestVersion {
+	if version < pm.latestVersion {
 		pm.logger.Warn("stale topology snapshot ignored",
-			slog.Uint64("version", snapshot.Version()),
+			slog.Uint64("version", version),
 			slog.Uint64("latest", pm.latestVersion),
 		)
 
 		return len(current)
 	}
 
-	pm.latestVersion = snapshot.Version()
+	pm.latestVersion = version
+
+	if onlineCount != 0 && !allowedOnline {
+		pm.logger.Warn("every online node is hidden by filter",
+			slog.Uint64("version", version),
+			slog.Int("online", onlineCount),
+		)
+	}
 
 	next := make([]instance, 0, len(current))
 	kept := make(map[string]struct{}, len(current))
 
 	// A node that changed address is not a survivor: its pool points at the old host.
 	for _, inst := range current {
-		node, ok := snapshot.Node(inst.uuid)
+		node, ok := nodesByID[inst.uuid]
 		if !ok || node.State != tpm.StateOnline || node.Address != inst.addr {
 			continue
 		}
@@ -123,8 +171,12 @@ func (pm *poolManager) reconcile(snapshot tpm.Snapshot) int {
 		kept[inst.uuid] = struct{}{}
 	}
 
-	for _, node := range snapshot.Nodes() {
+	for _, node := range nodes {
 		uuid := node.ID
+		if _, allowed := nodesByID[uuid]; !allowed {
+			continue
+		}
+
 		switch node.State {
 		case tpm.StateOnline:
 			// Opened below.
@@ -184,7 +236,7 @@ func (pm *poolManager) reconcile(snapshot tpm.Snapshot) int {
 	}
 
 	pm.logger.Debug("topology reconciled",
-		slog.Uint64("version", snapshot.Version()),
+		slog.Uint64("version", version),
 		slog.Int("pools", len(next)),
 	)
 

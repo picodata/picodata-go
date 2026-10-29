@@ -11,12 +11,18 @@ import (
 	"testing"
 	"time"
 
+	"git.picodata.io/core/drivers/picodata-go/internal/filter"
 	"git.picodata.io/core/drivers/picodata-go/internal/testenv"
 	tpm "git.picodata.io/core/drivers/picodata-go/topology"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type excludeNodeByID string
+
+// Allow implements [filter.Filter] by rejecting the node with the specified ID.
+func (id excludeNodeByID) Allow(node tpm.NodeInfo) bool { return node.ID != string(id) }
 
 func TestPoolManagerReconcile(t *testing.T) {
 	t.Run("StartsEmpty", func(t *testing.T) {
@@ -51,6 +57,117 @@ func TestPoolManagerReconcile(t *testing.T) {
 				assert.Equal(t, uint16(5434), cfg.Port)
 			}
 		}
+	})
+
+	t.Run("DifferentFiltersCombineWithAnd", func(t *testing.T) {
+		// A node rejected by either filter must not get a pool.
+		pm := newTestPoolManager(t, withPoolManagerFilters(
+			filter.NewForbiddenTiers([]string{"arbiter"}), excludeNodeByID("excluded-id"),
+		))
+		snap := snapshot(1,
+			tpm.NodeInfo{ID: "excluded-tier", Tier: "arbiter", State: tpm.StateOnline, Address: "localhost:5432"},
+			node("excluded-id", "localhost:5433"),
+			node("allowed", "localhost:5434"),
+		)
+		expected := snap.Clone()
+
+		require.Equal(t, 1, pm.reconcile(snap))
+		assert.Equal(t, []string{"allowed"}, uuidsOf(rotation(pm)))
+		assert.Equal(t, expected, snap.Clone())
+	})
+
+	t.Run("RepeatedFilterOptionsAccumulate", func(t *testing.T) {
+		// Repeated options exclude both tiers without changing the full snapshot.
+		pm := newTestPoolManager(t,
+			withPoolManagerFilters(filter.NewForbiddenTiers([]string{"arbiter"})),
+			withPoolManagerFilters(filter.NewForbiddenTiers([]string{"readonly"})),
+		)
+		snap := snapshot(1,
+			tpm.NodeInfo{ID: "node-1", Tier: "default", State: tpm.StateOnline, Address: "localhost:5432"},
+			tpm.NodeInfo{ID: "node-2", Tier: "readonly", State: tpm.StateOnline, Address: "localhost:5433"},
+			tpm.NodeInfo{ID: "node-3", Tier: "arbiter", State: tpm.StateOnline, Address: "localhost:5434"},
+		)
+		expected := snap.Clone()
+		pm.reconcile(snap)
+		require.Equal(t, []string{"node-1"}, uuidsOf(rotation(pm)))
+		assert.Equal(t, expected, snap.Clone(), "filtering must not change the source snapshot")
+		warm := rotation(pm)[0].pool
+
+		// An excluded node changes; the allowed node keeps its pool.
+		next := snap.Clone()
+		next.Version++
+		n := next.Nodes["node-3"]
+		n.State = tpm.StateOffline
+		next.Nodes[n.ID] = n
+		pm.reconcile(testSnapshot{next})
+		require.Equal(t, []string{"node-1"}, uuidsOf(rotation(pm)))
+		assert.Same(t, warm, rotation(pm)[0].pool)
+	})
+
+	t.Run("WarnsWhenEveryOnlineNodeIsHidden", func(t *testing.T) {
+		var warnings int
+		logger := slog.New(recordHandler{onRecord: func(msg string) {
+			if msg == "every online node is hidden by filter" {
+				warnings++
+			}
+		}})
+		pm := newTestPoolManager(t, withPoolManagerFilters(filter.NewForbiddenTiers([]string{"arbiter"})), withPoolManagerLogger(logger))
+		pm.reconcile(snapshot(1, node("allowed", "localhost:5432")))
+		assert.Zero(t, warnings)
+
+		// Filtering away every online node leaves the driver with nothing to
+		// route to, which is worth saying out loud rather than failing silently.
+		// An allowed offline node must not suppress the warning.
+		pm.reconcile(snapshot(2,
+			tpm.NodeInfo{ID: "arbiter", Tier: "arbiter", State: tpm.StateOnline},
+			node("allowed", "localhost:5432", tpm.StateOffline),
+		))
+		assert.Equal(t, 1, warnings)
+
+		// No online nodes and failed pool creation must not be reported as filtering.
+		pm.reconcile(snapshot(3, node("offline", "localhost:5432", tpm.StateOffline)))
+		pm.reconcile(snapshot(4, node("invalid", "invalid-address")))
+		assert.Equal(t, 1, warnings)
+
+		// An obsolete report must not emit a filtering warning.
+		pm.reconcile(snapshot(3,
+			tpm.NodeInfo{ID: "arbiter", Tier: "arbiter", State: tpm.StateOnline},
+		))
+		assert.Equal(t, 1, warnings)
+	})
+
+	t.Run("StaysSilentWhenSomeOnlineNodeIsAllowed", func(t *testing.T) {
+		// An allowed online node suppresses the filtering warning.
+		var warnings int
+		logger := slog.New(recordHandler{onRecord: func(msg string) {
+			if msg == "every online node is hidden by filter" {
+				warnings++
+			}
+		}})
+		pm := newTestPoolManager(t, withPoolManagerFilters(filter.NewForbiddenTiers([]string{"arbiter"})), withPoolManagerLogger(logger))
+		pm.reconcile(snapshot(1,
+			node("allowed", "localhost:5432"),
+			tpm.NodeInfo{ID: "arbiter", Tier: "arbiter", State: tpm.StateOnline},
+		))
+		assert.Zero(t, warnings)
+	})
+
+	t.Run("TierChangesUpdatePools", func(t *testing.T) {
+		// Changing a node's tier removes and restores its pool eligibility.
+		pm := newTestPoolManager(t, withPoolManagerFilters(filter.NewForbiddenTiers([]string{"arbiter"})))
+		n := node("node-1", "localhost:5432")
+		pm.reconcile(snapshot(1, n))
+		require.Equal(t, 1, pm.PoolSize())
+
+		n.Tier = "arbiter"
+		pm.reconcile(snapshot(2, n))
+		assert.Zero(t, pm.PoolSize())
+		assert.Nil(t, pm.pick(0))
+
+		n.Tier = "default"
+		pm.reconcile(snapshot(3, n))
+		assert.Equal(t, 1, pm.PoolSize())
+		assert.NotNil(t, pm.pick(0))
 	})
 
 	t.Run("AppliesConnectionsPerInstance", func(t *testing.T) {

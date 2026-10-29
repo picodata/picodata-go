@@ -1,7 +1,6 @@
 package topology
 
 import (
-	"fmt"
 	"log/slog"
 	"maps"
 	"testing"
@@ -10,59 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type excludeNodeByID string
-
-// Allow implements Filter by rejecting the node with the specified ID.
-func (id excludeNodeByID) Allow(node NodeInfo) bool { return node.ID != string(id) }
-
 type listenerFunc func(Snapshot)
 
 func (f listenerFunc) OnTopologyChanged(snapshot Snapshot) { f(snapshot) }
-
-func TestTopologyManager_CheckOnlineNodes(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		nodes     []NodeInfo
-		forbidden []string
-		wantCount int
-		wantError error
-	}{
-		{"EmptyTopology", nil, nil, 0, ErrNoOnlineNodes},
-		{"OfflineNodesWithFilter", []NodeInfo{
-			{ID: "node-1", Tier: "arbiter", State: StateOffline},
-			{ID: "node-2", Tier: "default", State: StateOffline},
-		}, []string{"arbiter"}, 0, ErrNoOnlineNodes},
-		{"AllOnlineNodesFiltered", []NodeInfo{
-			{ID: "node-1", Tier: "arbiter", State: StateOnline},
-			{ID: "node-2", Tier: "default", State: StateOffline},
-		}, []string{"arbiter"}, 0, ErrNoAllowedOnlineNodes},
-		{"OnlineNodesWithoutFilters", []NodeInfo{
-			{ID: "node-1", Tier: "default", State: StateOnline},
-			{ID: "node-2", Tier: "default", State: StateOnline},
-			{ID: "node-3", Tier: "default", State: StateOffline},
-		}, nil, 2, nil},
-		{"SomeOnlineNodesAllowed", []NodeInfo{
-			{ID: "node-1", Tier: "default", State: StateOnline},
-			{ID: "node-2", Tier: "default", State: StateOnline},
-			{ID: "node-3", Tier: "arbiter", State: StateOnline},
-			{ID: "node-4", Tier: "default", State: StateOffline},
-		}, []string{"arbiter"}, 2, nil},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			report := &ClusterTopology{Version: 1, Nodes: make(map[string]NodeInfo)}
-			for _, node := range tt.nodes {
-				report.Nodes[node.ID] = node
-			}
-			manager := &Manager{logger: slog.New(slog.DiscardHandler)}
-			WithForbiddenTiers(tt.forbidden...)(manager)
-			manager.store(report)
-
-			count, err := manager.CheckOnlineNodes()
-			assert.Equal(t, tt.wantCount, count)
-			assert.ErrorIs(t, err, tt.wantError)
-		})
-	}
-}
 
 func TestTopologyManager_SnapshotIsDetachedFromTheSource(t *testing.T) {
 	newReport := func(version uint64) *ClusterTopology {
@@ -80,43 +29,28 @@ func TestTopologyManager_SnapshotIsDetachedFromTheSource(t *testing.T) {
 		}
 	}
 
-	for _, filtered := range []bool{false, true} {
-		t.Run(fmt.Sprintf("Filtered=%t", filtered), func(t *testing.T) {
-			manager := &Manager{logger: slog.New(slog.DiscardHandler)}
-			if filtered {
-				WithForbiddenTiers("other")(manager)
-			}
+	manager := &Manager{logger: slog.New(slog.DiscardHandler)}
+	for version := uint64(1); version <= 2; version++ {
+		incoming := newReport(version)
+		if version == 1 {
+			manager.store(incoming)
+		} else {
+			manager.applyAndNotify(incoming)
+		}
 
-			for version := uint64(1); version <= 2; version++ {
-				incoming := newReport(version)
-				if version == 1 {
-					manager.store(incoming)
-				} else {
-					manager.applyAndNotify(incoming)
-				}
+		expected := newReport(version)
 
-				expected := newReport(version)
-				expectedVisible := newReport(version)
-				if filtered {
-					delete(expectedVisible.Nodes, "node-2")
-					delete(expectedVisible.Replicasets, "rs-2")
-					delete(expectedVisible.BucketCounts, "other")
-				}
+		// Mutating the source's report after storing it must not change
+		// the immutable state held by the manager.
+		incoming.Version = 99
+		delete(incoming.Nodes, "node-1")
+		incoming.Nodes["extra"] = NodeInfo{ID: "extra", Tier: "default", State: StateOnline}
+		incoming.Replicasets["rs-1"] = ReplicasetInfo{}
+		delete(incoming.Replicasets, "rs-2")
+		incoming.BucketCounts["default"] = 0
+		delete(incoming.BucketCounts, "other")
 
-				// Mutating the source's report after storing it must not change
-				// either the full or the filtered state held by the manager.
-				incoming.Version = 99
-				delete(incoming.Nodes, "node-1")
-				incoming.Nodes["extra"] = NodeInfo{ID: "extra", Tier: "default", State: StateOnline}
-				incoming.Replicasets["rs-1"] = ReplicasetInfo{}
-				delete(incoming.Replicasets, "rs-2")
-				incoming.BucketCounts["default"] = 0
-				delete(incoming.BucketCounts, "other")
-
-				assert.Equal(t, expected, manager.current.Load().topology)
-				assert.Equal(t, expectedVisible, manager.filtered.Load().topology)
-			}
-		})
+		assert.Equal(t, expected, manager.current.Load().topology)
 	}
 }
 
@@ -151,7 +85,7 @@ func TestTopologyManager_ListenersShareImmutableSnapshot(t *testing.T) {
 	require.Len(t, received[1], 1)
 	first := received[0][0]
 	assert.Same(t, first, received[1][0])
-	assert.Same(t, manager.filtered.Load(), first)
+	assert.Same(t, manager.current.Load(), first)
 	assert.Equal(t, report.Version, first.Version())
 	nodes := first.Nodes()
 	expectedNodes := []NodeInfo{report.Nodes["node-1"], report.Nodes["node-2"]}
@@ -204,30 +138,4 @@ func TestTopologyManager_ListenersShareImmutableSnapshot(t *testing.T) {
 	assert.NotSame(t, first, received[0][1])
 	assert.Equal(t, next, received[0][1].Clone())
 	assert.Equal(t, expected, first.Clone(), "an update must not change a previously published snapshot")
-}
-
-// Filtering out the master node leaves its replica visible and preserves
-// CurrentMasterID: filtering must not change the actual master of a retained replicaset.
-func TestTopologyManager_PreservesMasterReferenceWhenMasterIsFilteredOut(t *testing.T) {
-	report := &ClusterTopology{
-		Version: 1,
-		Nodes: map[string]NodeInfo{
-			"master":  {ID: "master", ReplicasetID: "rs-1", Tier: "default", State: StateOnline},
-			"replica": {ID: "replica", ReplicasetID: "rs-1", Tier: "default", State: StateOnline},
-		},
-		Replicasets: map[string]ReplicasetInfo{
-			"rs-1": {ID: "rs-1", Tier: "default", CurrentMasterID: "master"},
-		},
-		BucketCounts: map[string]uint64{"default": 3000},
-	}
-	manager := &Manager{logger: slog.New(slog.DiscardHandler), filters: []Filter{excludeNodeByID("master")}}
-	manager.store(report)
-
-	assert.Equal(t, report, manager.current.Load().topology)
-	visible := manager.filtered.Load().Clone()
-	assert.Len(t, visible.Nodes, 1)
-	assert.Contains(t, visible.Nodes, "replica")
-	assert.Equal(t, report.Replicasets, visible.Replicasets)
-	assert.Equal(t, report.BucketCounts, visible.BucketCounts)
-	assert.Equal(t, "master", visible.Replicasets["rs-1"].CurrentMasterID)
 }

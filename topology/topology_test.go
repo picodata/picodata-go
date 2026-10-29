@@ -3,7 +3,6 @@ package topology_test
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -17,40 +16,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type countingHandler struct {
-	seen map[string]int
-	mu   *sync.Mutex
-}
-
-func newCountingHandler() (*slog.Logger, func(msg string) int) {
-	seen := map[string]int{}
-	mu := &sync.Mutex{}
-
-	count := func(msg string) int {
-		mu.Lock()
-		defer mu.Unlock()
-
-		return seen[msg]
-	}
-
-	return slog.New(countingHandler{seen: seen, mu: mu}), count
-}
-
-func (h countingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h countingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	h.seen[r.Message]++
-
-	return nil
-}
-
-func (h countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-func (h countingHandler) WithGroup(string) slog.Handler { return h }
 
 // mockListener records every topology it is handed. Keeping the whole sequence
 // is what tells a swallowed notification from a superseded one.
@@ -199,6 +164,7 @@ func TestTopologyManager_StreamingUpdates(t *testing.T) {
 // controlledSource serves a fixed initial snapshot and lets the test push
 // updates on demand.
 type controlledSource struct {
+	ctx     context.Context // subscription context, used to observe shutdown
 	mu      sync.Mutex
 	initial *topology.ClusterTopology
 	updates chan *topology.ClusterTopology
@@ -218,7 +184,8 @@ func (s *controlledSource) Fetch(_ context.Context) (*topology.ClusterTopology, 
 	return s.initial, nil
 }
 
-func (s *controlledSource) Subscribe(_ context.Context) (<-chan *topology.ClusterTopology, error) {
+func (s *controlledSource) Subscribe(ctx context.Context) (<-chan *topology.ClusterTopology, error) {
+	s.ctx = ctx
 	return s.updates, nil
 }
 
@@ -278,7 +245,7 @@ func awaitTopology(t *testing.T, ctx context.Context, listener *mockListener) *t
 }
 
 func TestTopologyManager_Notifications(t *testing.T) {
-	t.Run("SendsTheWholeVisibleClusterNotADelta", func(t *testing.T) {
+	t.Run("SendsTheWholeClusterNotADelta", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -296,7 +263,7 @@ func TestTopologyManager_Notifications(t *testing.T) {
 		require.Len(t, awaitTopology(t, ctx, listener).Nodes, 2)
 
 		// Only node-2 changed, but the listener reconciles against the full
-		// membership, so it must receive every visible node.
+		// membership, so it must receive every node.
 		source.updates <- testCluster(2,
 			testNode("node-1", "default", topology.StateOnline),
 			testNode("node-2", "default", topology.StateOffline),
@@ -578,6 +545,11 @@ func TestTopologyManager_MetadataUpdates(t *testing.T) {
 			rs.CurrentMasterID = "node-2"
 			report.Replicasets["rs-1"] = rs
 		}},
+		{"MasterAbsentFromNodes", func(report *topology.ClusterTopology) {
+			rs := report.Replicasets["rs-1"]
+			rs.CurrentMasterID = "absent-master"
+			report.Replicasets[rs.ID] = rs
+		}},
 		{"MasterBecomesUnknown", func(report *topology.ClusterTopology) {
 			rs := report.Replicasets["rs-1"]
 			rs.CurrentMasterID = ""
@@ -674,6 +646,10 @@ func TestClusterTopologyOnlineCount(t *testing.T) {
 	assert.Equal(t, 0, testCluster(1).OnlineCount())
 }
 
+type listenerFunc func(topology.Snapshot)
+
+func (f listenerFunc) OnTopologyChanged(snapshot topology.Snapshot) { f(snapshot) }
+
 func TestTopologyManager_Lifecycle(t *testing.T) {
 	t.Run("NilParentContextIsAccepted", func(t *testing.T) {
 		source := newControlledSource(testCluster(1,
@@ -703,52 +679,45 @@ func TestTopologyManager_Lifecycle(t *testing.T) {
 		assert.Nil(t, manager)
 	})
 
-	t.Run("WarnsWhenEveryOnlineNodeIsHidden", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		logger, count := newCountingHandler()
-
-		source := newControlledSource(testCluster(1,
-			testNode("node-1", "arbiter", topology.StateOnline),
-		))
-
-		// Filtering away every online node leaves the driver with nothing to
-		// route to, which is worth saying out loud rather than failing silently.
-		manager, err := topology.NewTopologyManager(ctx, source,
-			topology.WithForbiddenTiers("arbiter"),
-			topology.WithLogger(logger),
-		)
-		require.NoError(t, err)
-		defer manager.Close()
-
-		assert.Equal(t, 1, count("every online node is hidden by filter"))
-	})
-
-	t.Run("StaysSilentWhenSomeNodeRemainsVisible", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		logger, count := newCountingHandler()
-
+	t.Run("CloseWaitsForInFlightListener", func(t *testing.T) {
 		source := newControlledSource(testCluster(1,
 			testNode("node-1", "default", topology.StateOnline),
-			testNode("node-2", "arbiter", topology.StateOnline),
 		))
-
-		manager, err := topology.NewTopologyManager(ctx, source,
-			topology.WithForbiddenTiers("arbiter"),
-			topology.WithLogger(logger),
-		)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		manager, err := topology.NewTopologyManager(ctx, source)
 		require.NoError(t, err)
 		defer manager.Close()
 
-		assert.Equal(t, 0, count("every online node is hidden by filter"))
+		entered, finished := make(chan struct{}), make(chan struct{})
+		manager.AddListener(listenerFunc(func(snapshot topology.Snapshot) {
+			if snapshot.Version() == 2 {
+				close(entered)
+				// Cancellation lets this callback finish; Close must join it.
+				<-source.ctx.Done()
+				close(finished)
+			}
+		}))
+		source.updates <- testCluster(2,
+			testNode("node-1", "default", topology.StateOffline),
+		)
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("update callback never started")
+		}
+
+		manager.Close()
+		select {
+		case <-finished:
+		default:
+			t.Fatal("Close returned before the update callback finished")
+		}
 	})
 }
 
-func TestTopologyManager_Filters(t *testing.T) {
-	t.Run("HidesForbiddenTiersFromListeners", func(t *testing.T) {
+func TestTopologyManager_FullTopology(t *testing.T) {
+	t.Run("IncludesEveryTierInListeners", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -758,7 +727,7 @@ func TestTopologyManager_Filters(t *testing.T) {
 			testNode("node-3", "arbiter", topology.StateOnline),
 		))
 
-		manager, err := topology.NewTopologyManager(ctx, source, topology.WithForbiddenTiers("arbiter"))
+		manager, err := topology.NewTopologyManager(ctx, source)
 		require.NoError(t, err)
 		defer manager.Close()
 
@@ -766,11 +735,11 @@ func TestTopologyManager_Filters(t *testing.T) {
 		manager.AddListener(listener)
 
 		received := awaitTopology(t, ctx, listener)
-		require.Len(t, received.Nodes, 2)
-		assert.NotContains(t, received.Nodes, "node-3")
+		require.Len(t, received.Nodes, 3)
+		assert.Contains(t, received.Nodes, "node-3")
 	})
 
-	t.Run("HiddenNodeChangesDoNotWakeListeners", func(t *testing.T) {
+	t.Run("AllNodeChangesWakeListeners", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -779,7 +748,7 @@ func TestTopologyManager_Filters(t *testing.T) {
 			testNode("node-2", "arbiter", topology.StateOnline),
 		))
 
-		manager, err := topology.NewTopologyManager(ctx, source, topology.WithForbiddenTiers("arbiter"))
+		manager, err := topology.NewTopologyManager(ctx, source)
 		require.NoError(t, err)
 		defer manager.Close()
 
@@ -787,56 +756,28 @@ func TestTopologyManager_Filters(t *testing.T) {
 		manager.AddListener(listener)
 
 		initial := awaitTopology(t, ctx, listener)
-		require.Len(t, initial.Nodes, 1)
+		require.Len(t, initial.Nodes, 2)
 		require.Contains(t, initial.Nodes, "node-1")
 
-		// Only the hidden node moved: the visible cluster is unchanged.
+		// Only the arbiter node changed; listeners still need this update.
 		source.updates <- testCluster(2,
 			testNode("node-1", "default", topology.StateOnline),
 			testNode("node-2", "arbiter", topology.StateOffline),
 		)
-		// A change the listener is allowed to see. Updates are processed in
-		// order, so receiving version 3 first proves version 2 was swallowed.
+		// A subsequent change to the default tier must also be delivered.
 		source.updates <- testCluster(3,
 			testNode("node-1", "default", topology.StateOffline),
 			testNode("node-2", "arbiter", topology.StateOffline),
 		)
 
 		received := awaitVersion(t, ctx, listener, 3)
-		assert.Equal(t, []uint64{1, 3}, listener.versions(),
-			"the hidden-only change must not reach the listeners")
-		require.Len(t, received.Nodes, 1)
+		assert.Equal(t, []uint64{1, 2, 3}, listener.versions(),
+			"changes in every tier must reach the listeners")
+		require.Len(t, received.Nodes, 2)
 		assert.Equal(t, topology.StateOffline, received.Nodes["node-1"].State)
 	})
 
-	t.Run("CombinesFiltersWithAnd", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		source := newControlledSource(testCluster(1,
-			testNode("node-1", "default", topology.StateOnline),
-			testNode("node-2", "readonly", topology.StateOnline),
-			testNode("node-3", "arbiter", topology.StateOnline),
-		))
-
-		// Repeated options accumulate: a node is exposed only if every filter
-		// allows it.
-		manager, err := topology.NewTopologyManager(ctx, source,
-			topology.WithForbiddenTiers("arbiter"),
-			topology.WithForbiddenTiers("readonly"),
-		)
-		require.NoError(t, err)
-		defer manager.Close()
-
-		listener := newMockListener()
-		manager.AddListener(listener)
-
-		received := awaitTopology(t, ctx, listener)
-		require.Len(t, received.Nodes, 1)
-		assert.Contains(t, received.Nodes, "node-1")
-	})
-
-	t.Run("FiltersNodesReplicasetsAndTiersTogether", func(t *testing.T) {
+	t.Run("PreservesNodesReplicasetsAndTiersTogether", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -847,21 +788,16 @@ func TestTopologyManager_Filters(t *testing.T) {
 		initial.Nodes["node-2"] = node
 		initial.Replicasets["rs-2"] = topology.ReplicasetInfo{ID: "rs-2", Tier: "other", CurrentMasterID: "node-2"}
 		source := newControlledSource(initial)
-		manager, err := topology.NewTopologyManager(ctx, source, topology.WithForbiddenTiers("other"))
+		manager, err := topology.NewTopologyManager(ctx, source)
 		require.NoError(t, err)
 		defer manager.Close()
 
 		listener := newMockListener()
 		manager.AddListener(listener)
-		visible := awaitTopology(t, ctx, listener)
-		assert.Contains(t, visible.Nodes, "node-1")
-		assert.NotContains(t, visible.Nodes, "node-2")
-		assert.Equal(t, map[string]topology.ReplicasetInfo{
-			"rs-1": initial.Replicasets["rs-1"],
-		}, visible.Replicasets)
-		assert.Equal(t, map[string]uint64{
-			"default": initial.BucketCounts["default"],
-		}, visible.BucketCounts)
+		received := awaitTopology(t, ctx, listener)
+		assert.Contains(t, received.Nodes, "node-1")
+		assert.Contains(t, received.Nodes, "node-2")
+		assert.Equal(t, initial, received)
 
 		next := initial.Clone()
 		next.Version = 2
@@ -870,21 +806,19 @@ func TestTopologyManager_Filters(t *testing.T) {
 		next.Replicasets["rs-2"] = rs
 		source.updates <- next
 
-		// Changing excluded metadata must not notify listeners. The following
-		// visible update proves that version 2 was processed and skipped.
+		// Metadata changes in either tier must notify listeners.
 		next = next.Clone()
 		next.Version = 3
 		next.BucketCounts["default"]++
 		source.updates <- next
 
 		updated := awaitVersion(t, ctx, listener, 3)
-		assert.Equal(t, visible.Nodes, updated.Nodes)
-		assert.Equal(t, visible.Replicasets, updated.Replicasets)
-		assert.Equal(t, map[string]uint64{"default": next.BucketCounts["default"]}, updated.BucketCounts)
-		assert.Equal(t, []uint64{1, 3}, listener.versions())
+		assert.Equal(t, received.Nodes, updated.Nodes)
+		assert.Equal(t, next.Replicasets, updated.Replicasets)
+		assert.Equal(t, next.BucketCounts, updated.BucketCounts)
+		assert.Equal(t, []uint64{1, 2, 3}, listener.versions())
 
-		// Once the node belongs to an allowed tier, its replicaset metadata
-		// must appear in the filtered topology again.
+		// Moving a node and its replicaset between tiers preserves all metadata.
 		next = next.Clone()
 		next.Version = 4
 		node = next.Nodes["node-2"]
@@ -898,39 +832,19 @@ func TestTopologyManager_Filters(t *testing.T) {
 		updated = awaitVersion(t, ctx, listener, 4)
 		assert.Equal(t, next.Nodes, updated.Nodes)
 		assert.Equal(t, next.Replicasets, updated.Replicasets)
-		assert.Equal(t, map[string]uint64{"default": next.BucketCounts["default"]}, updated.BucketCounts)
-	})
-
-	t.Run("AllNodesFilteredOutRemovesMetadata", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		initial := testMetadataCluster()
-		source := newControlledSource(initial)
-		manager, err := topology.NewTopologyManager(ctx, source, topology.WithForbiddenTiers("default", "other"))
-		require.NoError(t, err)
-		defer manager.Close()
-
-		listener := newMockListener()
-		manager.AddListener(listener)
-		visible := awaitTopology(t, ctx, listener)
-		assert.Equal(t, initial.Version, visible.Version)
-		assert.Empty(t, visible.Nodes)
-		assert.Empty(t, visible.Replicasets)
-		assert.Empty(t, visible.BucketCounts)
+		assert.Equal(t, next.BucketCounts, updated.BucketCounts)
 	})
 
 	t.Run("UnavailableMetadataStaysNil", func(t *testing.T) {
-		manager, err := topology.NewTopologyManager(context.Background(), static.New([]string{"localhost:5432"}),
-			topology.WithForbiddenTiers("arbiter"))
+		manager, err := topology.NewTopologyManager(context.Background(), static.New([]string{"localhost:5432"}))
 		require.NoError(t, err)
 		defer manager.Close()
 		listener := newMockListener()
 		manager.AddListener(listener)
 
-		visible := listener.getTopology()
-		require.Len(t, visible.Nodes, 1)
-		assert.Nil(t, visible.Replicasets)
-		assert.Nil(t, visible.BucketCounts)
+		received := listener.getTopology()
+		require.Len(t, received.Nodes, 1)
+		assert.Nil(t, received.Replicasets)
+		assert.Nil(t, received.BucketCounts)
 	})
 }

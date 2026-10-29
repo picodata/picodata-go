@@ -39,10 +39,10 @@ func newMockConfig(host string, port int) *pgxpool.Config {
 
 // newTestPoolManager closes its pools when the test ends: every pgxpool starts
 // a background health checker that would otherwise outlive it.
-func newTestPoolManager(t *testing.T) *poolManager {
+func newTestPoolManager(t *testing.T, opts ...poolManagerOption) *poolManager {
 	t.Helper()
 
-	pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1)
+	pm := newPoolManager(newMockConfig("127.0.0.1", 5432), 1, opts...)
 	t.Cleanup(pm.close)
 
 	return pm

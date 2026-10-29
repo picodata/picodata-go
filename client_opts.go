@@ -103,12 +103,13 @@ func WithMaxConnPerInstance(maxConns int32) PoolOption {
 	}
 }
 
-// WithForbiddenTiers excludes nodes of the given tiers from the connection pool,
+// WithForbiddenTiers excludes nodes of the given tiers from user connection pools,
 // for example WithForbiddenTiers("arbiter", "readonly").
 //
 // Filtering applies to the pools the client routes user queries to. Topology
-// discovery itself is not affected: the driver keeps polling the excluded nodes,
-// so it still notices when the allowed ones come back online.
+// discovery itself is not affected: the source may still connect to excluded
+// nodes, so it can still discover when the allowed ones come back online.
+// Topology listeners receive the full, unfiltered snapshot.
 //
 // Empty and whitespace-only entries are ignored.
 func WithForbiddenTiers(tiers ...string) PoolOption {

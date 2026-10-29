@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
+	"git.picodata.io/core/drivers/picodata-go/internal/filter"
 	"git.picodata.io/core/drivers/picodata-go/topology"
 	"git.picodata.io/core/drivers/picodata-go/topology/source/dynamic"
 	"git.picodata.io/core/drivers/picodata-go/topology/source/polling"
@@ -104,7 +104,11 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		poolOpts.bootstrapHosts = append(poolOpts.bootstrapHosts, primaryAddr)
 	}
 
-	pm := newPoolManager(config, poolOpts.maxConnsPerInstance, withPoolManagerLogger(logger))
+	poolManagerOpts := []poolManagerOption{withPoolManagerLogger(logger)}
+	if forbidden := filter.NewForbiddenTiers(poolOpts.forbiddenTiers); forbidden != nil {
+		poolManagerOpts = append(poolManagerOpts, withPoolManagerFilters(forbidden))
+	}
+	pm := newPoolManager(config, poolOpts.maxConnsPerInstance, poolManagerOpts...)
 
 	routerOpts := []routerOption{withRouterLogger(logger)}
 	if poolOpts.balanceStrategy != nil {
@@ -129,12 +133,7 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		topologySource = dynamic.New(config.ConnConfig, poolOpts.bootstrapHosts, dynamic.WithLogger(logger))
 	}
 
-	topologyOpts := []topology.Option{topology.WithLogger(logger)}
-	if len(poolOpts.forbiddenTiers) != 0 {
-		topologyOpts = append(topologyOpts, topology.WithForbiddenTiers(poolOpts.forbiddenTiers...))
-	}
-
-	topologyManager, err := topology.NewTopologyManager(ctx, topologySource, topologyOpts...)
+	topologyManager, err := topology.NewTopologyManager(ctx, topologySource, topology.WithLogger(logger))
 	if err != nil {
 		return nil, fmt.Errorf("topology manager init error: %w", err)
 	}
@@ -150,21 +149,19 @@ func NewWithConfig(ctx context.Context, config *pgxpool.Config, opts ...PoolOpti
 		// and there would be no handle left to close it.
 		pm.close()
 
-		onlineCount, err := topologyManager.CheckOnlineNodes()
-		if errors.Is(err, topology.ErrNoAllowedOnlineNodes) {
-			return nil, fmt.Errorf(
-				"no online nodes available after applying forbidden tiers filter: %s",
-				strings.Join(poolOpts.forbiddenTiers, ","),
-			)
+		snapshot := topologyManager.Snapshot()
+		if snapshot.OnlineCount() == 0 {
+			return nil, errors.New("no online nodes discovered")
 		}
-		if err != nil {
-			return nil, err
+		for _, node := range snapshot.Nodes() {
+			if node.State == topology.StateOnline && allowNode(node, pm.filters) {
+				// The per-node reason is logged where it happens: carrying it all the
+				// way here would mean keeping it on the pool manager for the lifetime
+				// of the client to serve a single message.
+				return nil, errors.New("failed to open a pool for any allowed online node, see the log for per-node errors")
+			}
 		}
-
-		// The per-node reason is logged where it happens: carrying it all the
-		// way here would mean keeping it on the pool manager for the lifetime
-		// of the client to serve a single message.
-		return nil, fmt.Errorf("failed to open a pool for any of %d online nodes, see the log for per-node errors", onlineCount)
+		return nil, errors.New("no online nodes available after applying filters")
 	}
 
 	return &Client{pm: pm, router: router, tpm: topologyManager}, nil

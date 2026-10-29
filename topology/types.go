@@ -40,7 +40,7 @@ type ReplicasetInfo struct {
 // BucketCounts maps tier names to their configured bucket counts.
 // Each report replaces the previous topology, including its metadata.
 // Replicasets and BucketCounts may be nil when a source does not provide that metadata.
-// CurrentMasterID may refer to a node absent from Nodes, including a filtered node.
+// CurrentMasterID may refer to a node absent from Nodes.
 // The manager copies reports before publishing them as read-only [Snapshot] values.
 type ClusterTopology struct {
 	Version      uint64
@@ -102,11 +102,12 @@ type StreamingSource interface {
 	Subscribe(ctx context.Context) (<-chan *ClusterTopology, error)
 }
 
-// Listener is notified whenever the visible cluster changes.
+// Listener is notified whenever the cluster topology changes.
 //
 // The argument is the whole cluster, not a delta: an instance missing from it
 // has left, so replace the view rather than merge into it, and make reapplying
-// the same snapshot a no-op. Never call back into the [Manager].
+// the same snapshot a no-op. Never call back into the [Manager], except for
+// the read-only [Manager.Snapshot] accessor.
 // Listeners share a read-only snapshot. Use Clone to obtain a mutable copy.
 type Listener interface {
 	OnTopologyChanged(Snapshot)

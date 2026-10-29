@@ -136,17 +136,17 @@ func TestRouter(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			pm.reconcile(snapshot(2,
+			r.OnTopologyChanged(snapshot(2,
 				node("uuid-1", "127.0.0.1:5432"),
 				node("uuid-2", "127.0.0.1:5433"),
 				node("uuid-3", "127.0.0.1:5434", tpm.StateOffline),
 			))
-			pm.reconcile(snapshot(3,
+			r.OnTopologyChanged(snapshot(3,
 				node("uuid-1", "127.0.0.1:5432"),
 				node("uuid-2", "127.0.0.1:5433", tpm.StateOffline),
 				node("uuid-3", "127.0.0.1:5434", tpm.StateOffline),
 			))
-			pm.reconcile(snapshot(4,
+			r.OnTopologyChanged(snapshot(4,
 				node("uuid-1", "127.0.0.1:5432", tpm.StateOffline),
 				node("uuid-2", "127.0.0.1:5433", tpm.StateOffline),
 				node("uuid-3", "127.0.0.1:5434"),
